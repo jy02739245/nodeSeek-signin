@@ -7,7 +7,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
@@ -64,14 +64,29 @@ def split_cookies(raw_value: str) -> list[str]:
     if not raw_value:
         return []
 
+    raw_value = raw_value.strip()
+    if not raw_value:
+        return []
+
+    if "&" in raw_value:
+        parts = raw_value.split("&")
+    else:
+        parts = [part for part in raw_value.splitlines() if part.strip()]
+
     cookies: list[str] = []
-    for part in re.split(r"(?:\r?\n|&)+", raw_value):
+    for part in parts:
         cookie = part.strip().strip("\"'")
         if cookie.lower().startswith("cookie:"):
             cookie = cookie.split(":", 1)[1].strip()
-        if cookie:
-            cookies.append(cookie)
+        cookies.append(cookie)
     return cookies
+
+
+def join_cookies_for_secret(cookies: list[str]) -> str:
+    normalized = [cookie.strip() for cookie in cookies]
+    while normalized and not normalized[-1]:
+        normalized.pop()
+    return "&".join(normalized)
 
 
 def collect_accounts() -> list[Account]:
@@ -168,8 +183,11 @@ def get_signin_stats(cookie: str, days: int = 30) -> SignStats | None:
         return None
 
     shanghai_tz = ZoneInfo("Asia/Shanghai")
-    query_start = datetime.now(shanghai_tz) - timedelta(days=max(days, 1))
-    signin_amounts: list[int] = []
+    days = max(days, 1)
+    today = datetime.now(shanghai_tz).date()
+    start_date = today - timedelta(days=days - 1)
+    query_start = datetime.combine(start_date, time.min, tzinfo=shanghai_tz)
+    signin_amounts_by_date: dict[str, int] = {}
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json, text/plain, */*",
@@ -204,7 +222,8 @@ def get_signin_stats(cookie: str, days: int = 30) -> SignStats | None:
                     continue
 
                 if "签到收益" in str(description) and "鸡腿" in str(description):
-                    signin_amounts.append(parse_credit_amount(amount))
+                    record_date = record_time.strftime("%Y-%m-%d")
+                    signin_amounts_by_date[record_date] = signin_amounts_by_date.get(record_date, 0) + parse_credit_amount(amount)
 
             if should_stop:
                 break
@@ -212,8 +231,8 @@ def get_signin_stats(cookie: str, days: int = 30) -> SignStats | None:
         print(f"签到收益统计查询失败: {exc}")
         return None
 
-    total_amount = sum(signin_amounts)
-    days_count = len(signin_amounts)
+    total_amount = sum(signin_amounts_by_date.values())
+    days_count = len(signin_amounts_by_date)
     average = round(total_amount / days_count, 2) if days_count else 0
     return SignStats(
         days_count=days_count,
@@ -520,7 +539,7 @@ def main() -> int:
     send_telegram(report)
 
     if cookies_updated:
-        merged_cookie = "&".join(cookie for cookie in cookies if cookie)
+        merged_cookie = join_cookies_for_secret(cookies)
         print("\n检测到 Cookie 更新，准备写回 GitHub Secret NS_COOKIE")
         cookie_save_failed = not save_cookie_to_github_secret(merged_cookie)
 
