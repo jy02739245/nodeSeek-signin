@@ -312,6 +312,7 @@ def github_headers(token: str) -> dict[str, str]:
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        "User-Agent": "nodeSeek-signin",
     }
 
 
