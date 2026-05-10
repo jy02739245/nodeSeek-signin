@@ -1,0 +1,73 @@
+name: NodeSeek Signin
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub Actions 使用 UTC；这里是北京时间每天 08:20。
+    - cron: "20 0 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nodeseek-signin
+  cancel-in-progress: false
+
+jobs:
+  signin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run NodeSeek signin
+        env:
+          NS_COOKIE: ${{ secrets.NS_COOKIE }}
+          USER: ${{ secrets.USER }}
+          PASS: ${{ secrets.PASS }}
+          USER1: ${{ secrets.USER1 }}
+          PASS1: ${{ secrets.PASS1 }}
+          USER2: ${{ secrets.USER2 }}
+          PASS2: ${{ secrets.PASS2 }}
+          USER3: ${{ secrets.USER3 }}
+          PASS3: ${{ secrets.PASS3 }}
+          USER4: ${{ secrets.USER4 }}
+          PASS4: ${{ secrets.PASS4 }}
+          USER5: ${{ secrets.USER5 }}
+          PASS5: ${{ secrets.PASS5 }}
+          USER6: ${{ secrets.USER6 }}
+          PASS6: ${{ secrets.PASS6 }}
+          USER7: ${{ secrets.USER7 }}
+          PASS7: ${{ secrets.PASS7 }}
+          USER8: ${{ secrets.USER8 }}
+          PASS8: ${{ secrets.PASS8 }}
+          USER9: ${{ secrets.USER9 }}
+          PASS9: ${{ secrets.PASS9 }}
+          USER10: ${{ secrets.USER10 }}
+          PASS10: ${{ secrets.PASS10 }}
+          CF_SOLVER_URL: ${{ secrets.CF_SOLVER_URL }}
+          CF_SOLVER_AUTH_TOKEN: ${{ secrets.CF_SOLVER_AUTH_TOKEN }}
+          CF_SOLVER_MODE: ${{ vars.CF_SOLVER_MODE || 'turnstile-min' }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_COOKIE_SECRET_NAME: NS_COOKIE
+          SAVE_COOKIE_TO_GITHUB: ${{ vars.SAVE_COOKIE_TO_GITHUB || 'true' }}
+          NS_RANDOM: ${{ vars.NS_RANDOM || 'true' }}
+          FAIL_ON_ERROR: ${{ vars.FAIL_ON_ERROR || 'true' }}
+          NS_IMPERSONATE: ${{ vars.NS_IMPERSONATE || 'chrome136' }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_USER_ID: ${{ secrets.TG_USER_ID }}
+          TG_THREAD_ID: ${{ secrets.TG_THREAD_ID }}
+          TG_API_HOST: ${{ vars.TG_API_HOST }}
+        run: python nodeseek_signin.py
