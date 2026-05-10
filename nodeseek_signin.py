@@ -247,6 +247,17 @@ def encrypt_for_github_secret(public_key_value: str, secret_value: str) -> str:
     return base64.b64encode(encrypted).decode("utf-8")
 
 
+def github_error_detail(response) -> str:
+    accepted_permissions = response.headers.get("x-accepted-github-permissions", "")
+    oauth_scopes = response.headers.get("x-oauth-scopes", "")
+    detail = f"HTTP {response.status_code}: {shorten_response(response.text, 500)}"
+    if accepted_permissions:
+        detail += f"; accepted-permissions={accepted_permissions}"
+    if oauth_scopes:
+        detail += f"; oauth-scopes={oauth_scopes}"
+    return detail
+
+
 def save_cookie_to_github_secret(cookie_value: str) -> bool:
     if not env_bool("SAVE_COOKIE_TO_GITHUB", True):
         print("SAVE_COOKIE_TO_GITHUB=false，跳过 GitHub Secret 写回")
@@ -263,7 +274,9 @@ def save_cookie_to_github_secret(cookie_value: str) -> bool:
     headers = github_headers(token)
     try:
         key_response = requests.get(f"{api_base}/public-key", headers=headers, timeout=30)
-        key_response.raise_for_status()
+        if key_response.status_code != 200:
+            print(f"获取 GitHub 仓库 public key 失败: {github_error_detail(key_response)}")
+            return False
         key_data = key_response.json()
 
         encrypted_value = encrypt_for_github_secret(key_data["key"], cookie_value)
