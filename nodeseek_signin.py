@@ -7,7 +7,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
@@ -34,6 +34,16 @@ class SignResult:
     status: str
     message: str
     gained: int = 0
+    account_name: str = ""
+    stats: SignStats | None = None
+
+
+@dataclass
+class SignStats:
+    days_count: int
+    total_amount: int
+    average: float
+    period: str
 
 
 @dataclass
@@ -85,6 +95,14 @@ def parse_gained(message: str) -> int:
     if not match:
         match = re.search(r"(\d+)\s*鸡腿", message)
     return int(match.group(1)) if match else 0
+
+
+def parse_credit_amount(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        match = re.search(r"-?\d+", str(value))
+        return int(match.group(0)) if match else 0
 
 
 def shorten_response(text: str, limit: int = 300) -> str:
@@ -143,6 +161,66 @@ def sign_cookie(cookie: str, index: int, random_enabled: bool) -> SignResult:
     else:
         status = "failed"
     return SignResult(index, False, status, message)
+
+
+def get_signin_stats(cookie: str, days: int = 30) -> SignStats | None:
+    if not cookie:
+        return None
+
+    shanghai_tz = ZoneInfo("Asia/Shanghai")
+    query_start = datetime.now(shanghai_tz) - timedelta(days=max(days, 1))
+    signin_amounts: list[int] = []
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Referer": f"{BASE_URL}/board",
+        "Cookie": cookie,
+    }
+
+    try:
+        for page in range(1, 21):
+            response = requests.get(
+                f"{BASE_URL}/api/account/credit/page-{page}",
+                headers=headers,
+                timeout=request_timeout(),
+                impersonate=impersonate_version(),
+            )
+            data = response.json()
+            if not isinstance(data, dict):
+                break
+            records = data.get("data")
+            if not data.get("success") or not records:
+                break
+
+            should_stop = False
+            for record in records:
+                if len(record) < 4:
+                    continue
+
+                amount, _, description, timestamp = record[:4]
+                record_time = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00")).astimezone(shanghai_tz)
+                if record_time < query_start:
+                    should_stop = True
+                    continue
+
+                if "签到收益" in str(description) and "鸡腿" in str(description):
+                    signin_amounts.append(parse_credit_amount(amount))
+
+            if should_stop:
+                break
+    except Exception as exc:
+        print(f"签到收益统计查询失败: {exc}")
+        return None
+
+    total_amount = sum(signin_amounts)
+    days_count = len(signin_amounts)
+    average = round(total_amount / days_count, 2) if days_count else 0
+    return SignStats(
+        days_count=days_count,
+        total_amount=total_amount,
+        average=average,
+        period=f"近{days}天",
+    )
 
 
 def should_retry_with_login(result: SignResult) -> bool:
@@ -301,23 +379,58 @@ def save_cookie_to_github_secret(cookie_value: str) -> bool:
     return False
 
 
+def mask_account_name(account_name: str) -> str:
+    if not account_name:
+        return "账号"
+    if account_name.startswith("账号"):
+        return account_name
+    if len(account_name) <= 2:
+        return account_name[0] + "***"
+    return account_name[:2] + "***"
+
+
+def format_number(value: float) -> str:
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
 def build_report(results: Iterable[SignResult]) -> str:
     result_list = list(results)
-    now = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
     success_count = sum(1 for result in result_list if result.ok)
     lines = [
-        "NodeSeek 签到报告",
-        f"时间: {now} Asia/Shanghai",
-        f"结果: {success_count}/{len(result_list)} 成功",
+        "NodeSeek 签到",
+        "",
+        "🤖 NodeSeek 自动签到报告",
+        f"📅 日期: {today}",
+        f"📊 统计: 成功 {success_count}/{len(result_list)}",
         "",
     ]
 
     for result in result_list:
-        mark = "OK" if result.ok else "FAIL"
-        gained = f"，获得 {result.gained} 鸡腿" if result.gained else ""
-        lines.append(f"[{mark}] 账号 {result.index}: {result.message}{gained}")
+        account_name = result.account_name or f"账号{result.index}"
+        lines.append(f"账号：{mask_account_name(account_name)}")
 
-    return "\n".join(lines)
+        if result.ok:
+            if result.gained or "鸡腿" in result.message or "收益" in result.message:
+                lines.append(f"✅ 签到成功！您获得了 {result.message}")
+            else:
+                lines.append(f"✅ 签到成功！{result.message}")
+
+            if result.stats:
+                lines.extend(
+                    [
+                        f"签到收益统计（{result.stats.period}）",
+                        f"📅 签到天数： {result.stats.days_count} 天",
+                        f"🍗 总收益： {result.stats.total_amount} 个",
+                        f"📈 日均收益： {format_number(result.stats.average)} 个",
+                    ]
+                )
+        else:
+            lines.append(f"❌ 签到失败：{result.message}")
+
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
 
 
 def send_telegram(text: str) -> None:
@@ -371,6 +484,7 @@ def main() -> int:
     for index in range(1, max_count + 1):
         cookie = cookies[index - 1]
         account = accounts[index - 1] if index - 1 < len(accounts) else None
+        account_name = account.user if account else f"账号{index}"
         print(f"\n开始签到账号 {index}")
         result = sign_cookie(cookie, index, random_enabled) if cookie else SignResult(index, False, "missing_cookie", "无 Cookie")
 
@@ -392,6 +506,11 @@ def main() -> int:
                     print(f"账号 {index} 自动登录失败: {login_message}")
             elif should_retry_with_login(result):
                 print(f"账号 {index} 未配置对应 USER/PASS，无法自动登录刷新 Cookie")
+
+        result.account_name = account_name
+        if result.ok:
+            effective_cookie = cookies[index - 1]
+            result.stats = get_signin_stats(effective_cookie, 30)
 
         results.append(result)
 
