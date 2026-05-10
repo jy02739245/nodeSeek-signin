@@ -1,6 +1,6 @@
 # NodeSeek GitHub Actions 签到
 
-这是一个只保留 GitHub Actions 定时运行的 NodeSeek 签到项目。实现参考了 [jy02739245/NodeSeek-Signin](https://github.com/jy02739245/NodeSeek-Signin) 的 GitHub Actions 思路，但本仓库只面向 Actions：优先使用 Cookie 签到，Cookie 失效时可用账号密码 + `cf-clearance-scraper` 自动登录，并把新 Cookie 写回 GitHub Secret。
+这是一个只保留 GitHub Actions 定时运行的 NodeSeek 签到项目。优先使用 Cookie 签到，Cookie 失效时可用账号密码 + `cf-clearance-scraper` 自动登录，并把新 Cookie 写回 GitHub Secret。
 
 ## 使用方式
 
