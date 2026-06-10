@@ -286,6 +286,53 @@ def solve_turnstile_token() -> tuple[str | None, str]:
     return None, f"验证码解析失败，HTTP {response.status_code}: {message}"
 
 
+def login_payloads(account: Account, token: str) -> list[dict[str, str]]:
+    base_payload = {
+        "username": account.user,
+        "password": account.password,
+    }
+    default_fields = [
+        "cf-turnstile-response",
+        "turnstile",
+        "turnstileToken",
+        "captcha",
+        "captchaToken",
+        "cfTurnstileResponse",
+        "token",
+    ]
+    raw_fields = os.getenv("NS_TURNSTILE_FIELDS", "").strip()
+    configured_fields = [field.strip() for field in raw_fields.split(",") if field.strip()]
+    fields = configured_fields or default_fields
+
+    payloads: list[dict[str, str]] = []
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    for field in fields:
+        payload = {**base_payload, field: token}
+        key = tuple(sorted(payload.items()))
+        if key not in seen:
+            payloads.append(payload)
+            seen.add(key)
+
+    legacy_payload = {**base_payload, "token": token, "source": "turnstile"}
+    key = tuple(sorted(legacy_payload.items()))
+    if key not in seen:
+        payloads.append(legacy_payload)
+    return payloads
+
+
+def should_try_next_login_payload(message: str) -> bool:
+    if re.search(r'"[^"]+"\s+is\s+not\s+allowed', message, re.IGNORECASE):
+        return True
+    return bool(
+        re.search(
+            r'"(?:captcha|captchaToken|turnstile|turnstileToken|cf[-_]?turnstile[-_]?response|cfTurnstileResponse|token)"'
+            r"\s+is\s+required",
+            message,
+            re.IGNORECASE,
+        )
+    )
+
+
 def login_with_password(account: Account) -> tuple[str | None, str]:
     token, token_message = solve_turnstile_token()
     if not token:
@@ -301,23 +348,35 @@ def login_with_password(account: Account) -> tuple[str | None, str]:
 
     try:
         session.get(SIGN_IN_URL, headers=common_headers, timeout=request_timeout())
-        response = session.post(
-            LOGIN_URL,
-            json={
-                "username": account.user,
-                "password": account.password,
-                "token": token,
-                "source": "turnstile",
-            },
-            headers={**common_headers, "Content-Type": "application/json"},
-            timeout=request_timeout(),
-        )
-        data = response.json()
     except Exception as exc:
-        return None, f"登录请求失败: {exc}"
+        return None, f"登录页请求失败: {exc}"
 
-    if not data.get("success"):
-        return None, str(data.get("message") or data)
+    last_message = ""
+    payloads = login_payloads(account, token)
+    for attempt, payload in enumerate(payloads, start=1):
+        turnstile_field = next(field for field in payload if field not in {"username", "password", "source"})
+        try:
+            response = session.post(
+                LOGIN_URL,
+                json=payload,
+                headers={**common_headers, "Content-Type": "application/json"},
+                timeout=request_timeout(),
+            )
+            data = response.json()
+        except Exception as exc:
+            return None, f"登录请求失败: {exc}"
+
+        if data.get("success"):
+            break
+
+        last_message = str(data.get("message") or data)
+        if should_try_next_login_payload(last_message) and attempt < len(payloads):
+            print(f"登录字段 {turnstile_field} 不被接受，尝试下一种 Turnstile 字段")
+            continue
+
+        return None, last_message
+    else:
+        return None, last_message or "登录失败"
 
     cookie_items = session.cookies.get_dict()
     cookie = "; ".join(f"{key}={value}" for key, value in cookie_items.items())

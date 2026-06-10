@@ -66,6 +66,7 @@ cookie_of_account_2
 | `FAIL_ON_ERROR` | Variable | `true` | 任一账号失败时是否让 Actions 失败 |
 | `NS_IMPERSONATE` | Variable | `chrome136` | `curl_cffi` 使用的浏览器指纹 |
 | `CF_SOLVER_MODE` | Variable | `turnstile-min` | 可改为 `turnstile-max` 做完整页面解析 |
+| `NS_TURNSTILE_FIELDS` | Variable | 空 | 自动登录时 Turnstile 字段名候选，逗号分隔；默认会自动尝试常见字段 |
 | `GITHUB_COOKIE_SECRET_NAME` | Variable | `NS_COOKIE` | 写回的 GitHub Secret 名称，通常不用改 |
 | `SAVE_COOKIE_TO_GITHUB` | Variable | `true` | 是否把自动登录获取的新 Cookie 写回 GitHub Secret |
 | `TG_API_HOST` | Variable | `https://api.telegram.org` | Telegram API 代理地址 |
