@@ -590,6 +590,10 @@ def _attempt_login(account: Account, captcha_token: str | None) -> tuple[str | N
 
 
 def login_with_password(account: Account) -> tuple[str | None, str]:
+    if env_bool("NS_FORCE_BROWSER_LOGIN", False):
+        print("NS_FORCE_BROWSER_LOGIN=true，跳过账号密码 API 登录，直接使用浏览器完整登录流程")
+        return login_with_browser(account)
+
     env_captcha_token = os.getenv("NS_CAPTCHA_TOKEN", "").strip()
     if env_captcha_token:
         print("使用环境变量中的 captcha token 登录")
