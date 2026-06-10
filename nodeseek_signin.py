@@ -567,6 +567,22 @@ def _attempt_login(account: Account, captcha_token: str | None) -> tuple[str | N
         return None, msg
 
     cookie_items = session.cookies.get_dict()
+    if not cookie_items:
+        set_cookies = response.headers.get("set-cookie", "") or ""
+        if not set_cookies:
+            set_cookies = "; ".join(
+                v for k, v in response.headers.items() if k.lower() == "set-cookie"
+            )
+        if set_cookies:
+            import http.cookies
+            jar = http.cookies.SimpleCookie()
+            for part in set_cookies.split(","):
+                try:
+                    jar.load(part.strip())
+                except Exception:
+                    pass
+            cookie_items = {k: v.value for k, v in jar.items()}
+
     cookie = "; ".join(f"{key}={value}" for key, value in cookie_items.items())
     if not cookie:
         return None, "登录成功但未获取到 Cookie"
