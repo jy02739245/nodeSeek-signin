@@ -59,7 +59,8 @@ jobs:
           CF_SOLVER_URL: ${{ secrets.CF_SOLVER_URL }}
           CF_SOLVER_AUTH_TOKEN: ${{ secrets.CF_SOLVER_AUTH_TOKEN }}
           CF_SOLVER_MODE: ${{ vars.CF_SOLVER_MODE || 'turnstile-min' }}
-          NS_TURNSTILE_FIELDS: ${{ vars.NS_TURNSTILE_FIELDS }}
+          NS_SECURITY_TOKEN: ${{ secrets.NS_SECURITY_TOKEN }}
+          NS_INTEGRITY_TOKEN: ${{ secrets.NS_INTEGRITY_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_COOKIE_SECRET_NAME: NS_COOKIE

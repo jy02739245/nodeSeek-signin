@@ -18,6 +18,7 @@ BASE_URL = "https://www.nodeseek.com"
 SIGN_IN_URL = f"{BASE_URL}/signIn.html"
 ATTENDANCE_URL = f"{BASE_URL}/api/attendance"
 LOGIN_URL = f"{BASE_URL}/api/account/signIn"
+LOGIN_UTIL_URL = f"{BASE_URL}/api/account/util"
 TURNSTILE_SITE_KEY = "0x4AAAAAAAaNy7leGjewpVyR"
 GITHUB_API_VERSION = "2022-11-28"
 USER_AGENT = (
@@ -286,63 +287,61 @@ def solve_turnstile_token() -> tuple[str | None, str]:
     return None, f"验证码解析失败，HTTP {response.status_code}: {message}"
 
 
-def login_payloads(account: Account, token: str | None) -> list[dict[str, str]]:
-    base_payload = {
-        "username": account.user,
-        "password": account.password,
-    }
-    payloads: list[dict[str, str]] = [base_payload]
-    if not token:
-        return payloads
-
-    default_fields = [
-        "cf-turnstile-response",
-        "turnstile",
-        "turnstileToken",
-        "captcha",
-        "captchaToken",
-        "cfTurnstileResponse",
-        "token",
-    ]
-    raw_fields = os.getenv("NS_TURNSTILE_FIELDS", "").strip()
-    configured_fields = [field.strip() for field in raw_fields.split(",") if field.strip()]
-    fields = configured_fields or default_fields
-
-    seen: set[tuple[tuple[str, str], ...]] = set()
-    seen.add(tuple(sorted(base_payload.items())))
-    for field in fields:
-        payload = {**base_payload, field: token}
-        key = tuple(sorted(payload.items()))
-        if key not in seen:
-            payloads.append(payload)
-            seen.add(key)
-
-    legacy_payload = {**base_payload, "token": token, "source": "turnstile"}
-    key = tuple(sorted(legacy_payload.items()))
-    if key not in seen:
-        payloads.append(legacy_payload)
-    return payloads
+def find_nested_value(value, normalized_names: set[str]) -> str:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized_key in normalized_names and item:
+                return str(item)
+            found = find_nested_value(item, normalized_names)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = find_nested_value(item, normalized_names)
+            if found:
+                return found
+    return ""
 
 
-def should_try_next_login_payload(message: str) -> bool:
-    if re.search(r'"[^"]+"\s+is\s+not\s+allowed', message, re.IGNORECASE):
-        return True
-    if re.search(r"(captcha|turnstile|验证码|人机验证|Cloudflare)", message, re.IGNORECASE):
-        return True
-    return bool(
-        re.search(
-            r'"(?:captcha|captchaToken|turnstile|turnstileToken|cf[-_]?turnstile[-_]?response|cfTurnstileResponse|token)"'
-            r"\s+is\s+required",
-            message,
-            re.IGNORECASE,
+def get_login_security_headers(session, common_headers: dict[str, str]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    env_security_token = os.getenv("NS_SECURITY_TOKEN", "").strip()
+    env_integrity_token = os.getenv("NS_INTEGRITY_TOKEN", "").strip()
+    if env_security_token:
+        headers["x-security-token"] = env_security_token
+    if env_integrity_token:
+        headers["x-integrity-token"] = env_integrity_token
+
+    if headers:
+        return headers
+
+    try:
+        response = session.get(
+            LOGIN_UTIL_URL,
+            headers=common_headers,
+            timeout=request_timeout(),
         )
-    )
+        data = response.json()
+    except Exception as exc:
+        print(f"登录安全 token 获取失败: {exc}")
+        return headers
+
+    security_token = find_nested_value(data, {"securitytoken", "xsecuritytoken"})
+    integrity_token = find_nested_value(data, {"integritytoken", "xintegritytoken"})
+    if security_token:
+        headers["x-security-token"] = security_token
+    if integrity_token:
+        headers["x-integrity-token"] = integrity_token
+    if headers:
+        print("已获取登录安全 token")
+    return headers
 
 
 def login_with_password(account: Account) -> tuple[str | None, str]:
     token, token_message = solve_turnstile_token()
     if not token:
-        print(f"{token_message}，尝试直接使用账号密码登录")
+        return None, token_message
 
     session = requests.Session(impersonate=impersonate_version())
     common_headers = {
@@ -357,35 +356,29 @@ def login_with_password(account: Account) -> tuple[str | None, str]:
     except Exception as exc:
         return None, f"登录页请求失败: {exc}"
 
-    last_message = ""
-    payloads = login_payloads(account, token)
-    for attempt, payload in enumerate(payloads, start=1):
-        turnstile_field = next(
-            (field for field in payload if field not in {"username", "password", "source"}),
-            "仅账号密码",
+    security_headers = get_login_security_headers(session, common_headers)
+    try:
+        response = session.post(
+            LOGIN_URL,
+            json={
+                "username": account.user,
+                "password": account.password,
+            },
+            headers={
+                **common_headers,
+                **security_headers,
+                "Content-Type": "application/json",
+                "x-captcha-source": "turnstile",
+                "x-captcha-token": token,
+            },
+            timeout=request_timeout(),
         )
-        try:
-            response = session.post(
-                LOGIN_URL,
-                json=payload,
-                headers={**common_headers, "Content-Type": "application/json"},
-                timeout=request_timeout(),
-            )
-            data = response.json()
-        except Exception as exc:
-            return None, f"登录请求失败: {exc}"
+        data = response.json()
+    except Exception as exc:
+        return None, f"登录请求失败: {exc}"
 
-        if isinstance(data, dict) and data.get("success"):
-            break
-
-        last_message = str(data.get("message") or data) if isinstance(data, dict) else str(data)
-        if should_try_next_login_payload(last_message) and attempt < len(payloads):
-            print(f"登录方式 {turnstile_field} 未通过，尝试下一种登录参数")
-            continue
-
-        return None, last_message
-    else:
-        return None, last_message or "登录失败"
+    if not isinstance(data, dict) or not data.get("success"):
+        return None, str(data.get("message") or data) if isinstance(data, dict) else str(data)
 
     cookie_items = session.cookies.get_dict()
     cookie = "; ".join(f"{key}={value}" for key, value in cookie_items.items())

@@ -59,6 +59,8 @@ cookie_of_account_2
 | `CF_SOLVER_URL` | Secret | 空 | `cf-clearance-scraper` 服务地址 |
 | `CF_SOLVER_AUTH_TOKEN` | Secret | 空 | 可选的 solver 服务认证 token |
 | `GH_PAT` | Secret | 空 | 自动更新 `NS_COOKIE` Secret 所需的 GitHub PAT |
+| `NS_SECURITY_TOKEN` | Secret | 空 | 可选调试项，覆盖登录请求头 `x-security-token`，通常不用配置 |
+| `NS_INTEGRITY_TOKEN` | Secret | 空 | 可选调试项，覆盖登录请求头 `x-integrity-token`，通常不用配置 |
 | `TG_BOT_TOKEN` | Secret | 空 | Telegram Bot Token |
 | `TG_USER_ID` | Secret | 空 | Telegram 接收者 ID |
 | `TG_THREAD_ID` | Secret | 空 | Telegram 群组话题 ID |
@@ -66,7 +68,6 @@ cookie_of_account_2
 | `FAIL_ON_ERROR` | Variable | `true` | 任一账号失败时是否让 Actions 失败 |
 | `NS_IMPERSONATE` | Variable | `chrome136` | `curl_cffi` 使用的浏览器指纹 |
 | `CF_SOLVER_MODE` | Variable | `turnstile-min` | 可改为 `turnstile-max` 做完整页面解析 |
-| `NS_TURNSTILE_FIELDS` | Variable | 空 | 自动登录时 Turnstile 字段名候选，逗号分隔；默认会自动尝试常见字段 |
 | `GITHUB_COOKIE_SECRET_NAME` | Variable | `NS_COOKIE` | 写回的 GitHub Secret 名称，通常不用改 |
 | `SAVE_COOKIE_TO_GITHUB` | Variable | `true` | 是否把自动登录获取的新 Cookie 写回 GitHub Secret |
 | `TG_API_HOST` | Variable | `https://api.telegram.org` | Telegram API 代理地址 |
