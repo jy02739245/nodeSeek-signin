@@ -8,10 +8,32 @@ import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
 from curl_cffi import requests
+
+
+def load_dotenv():
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.is_file():
+        return
+    with env_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip("\"'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+load_dotenv()
 
 
 BASE_URL = "https://www.nodeseek.com"
@@ -259,7 +281,7 @@ def cf_solver_endpoint() -> str:
 def solve_turnstile_token() -> tuple[str | None, str]:
     endpoint = cf_solver_endpoint()
     if not endpoint:
-        return None, "未配置 CF_SOLVER_URL"
+        return solve_turnstile_with_browser()
 
     mode = os.getenv("CF_SOLVER_MODE", "turnstile-min").strip() or "turnstile-min"
     payload: dict[str, object] = {
@@ -284,7 +306,171 @@ def solve_turnstile_token() -> tuple[str | None, str]:
         return str(token), "验证码解析成功"
 
     message = data.get("message") if isinstance(data, dict) else response.text
-    return None, f"验证码解析失败，HTTP {response.status_code}: {message}"
+    print(f"CF_SOLVER 验证码解析失败: {message}，尝试浏览器方案...")
+    return solve_turnstile_with_browser()
+
+
+def solve_turnstile_with_browser() -> tuple[str | None, str]:
+    try:
+        from patchright.sync_api import sync_playwright
+    except ImportError:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return None, "patchright/playwright 未安装，无法使用浏览器解析验证码"
+
+    headless = env_bool("NS_HEADLESS", False)
+    print(f"启动浏览器解析 Turnstile 验证码 (headless={headless})...")
+
+    try:
+        with sync_playwright() as p:
+            profile_dir = str(Path(__file__).parent / ".browser_profile")
+            context = p.chromium.launch_persistent_context(
+                profile_dir,
+                headless=headless,
+                viewport={"width": 1280, "height": 800},
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            page = context.new_page()
+            page.goto(SIGN_IN_URL, wait_until="load", timeout=60000)
+            page.wait_for_timeout(8000)
+
+            _click_turnstile(page)
+
+            for attempt in range(40):
+                token_value = page.evaluate("""() => {
+                    const input = document.querySelector('[name="cf-turnstile-response"]');
+                    return (input && input.value) ? input.value : '';
+                }""")
+                if token_value:
+                    context.close()
+                    print("浏览器 Turnstile 验证码解析成功")
+                    return token_value, "验证码解析成功"
+                if attempt % 10 == 9:
+                    print(f"  等待 Turnstile 验证完成... ({attempt + 1}s)")
+                page.wait_for_timeout(1000)
+
+            context.close()
+    except Exception as exc:
+        return None, f"浏览器验证码解析异常: {exc}"
+
+    return None, "浏览器未能解析 Turnstile 验证码（超时）"
+
+
+def _click_turnstile(page):
+    for frame in page.frames:
+        if "challenges.cloudflare.com" in (frame.url or ""):
+            try:
+                el = frame.frame_element()
+                bbox = el.bounding_box()
+                if bbox:
+                    page.mouse.click(bbox["x"] + 30, bbox["y"] + bbox["height"] / 2)
+                    return
+            except Exception:
+                pass
+
+    turnstile_container = page.evaluate("""() => {
+        const el = document.querySelector('.cf-turnstile, [class*="turnstile"]');
+        if (el) {
+            const r = el.getBoundingClientRect();
+            return {x: r.x, y: r.y, w: r.width, h: r.height};
+        }
+        const input = document.querySelector('[name="cf-turnstile-response"]');
+        if (input && input.parentElement) {
+            const r = input.parentElement.getBoundingClientRect();
+            return {x: r.x, y: r.y, w: r.width, h: r.height};
+        }
+        return null;
+    }""")
+    if turnstile_container:
+        page.mouse.click(
+            turnstile_container["x"] + 30,
+            turnstile_container["y"] + turnstile_container["h"] / 2,
+        )
+    else:
+        page.mouse.click(155, 300)
+
+
+def login_with_browser(account: Account) -> tuple[str | None, str]:
+    try:
+        from patchright.sync_api import sync_playwright
+    except ImportError:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return None, "patchright/playwright 未安装，无法使用浏览器登录"
+
+    headless = env_bool("NS_HEADLESS", False)
+    print(f"启动浏览器执行完整登录流程 (headless={headless})...")
+
+    try:
+        with sync_playwright() as p:
+            profile_dir = str(Path(__file__).parent / ".browser_profile")
+            context = p.chromium.launch_persistent_context(
+                profile_dir,
+                headless=headless,
+                viewport={"width": 1280, "height": 800},
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            page = context.new_page()
+            page.goto(SIGN_IN_URL, wait_until="load", timeout=60000)
+            page.wait_for_timeout(8000)
+
+            page.locator("#stacked-email").fill(account.user)
+            page.locator("#stacked-password").fill(account.password)
+            print("  已填入用户名和密码")
+
+            _click_turnstile(page)
+
+            print("  等待 Turnstile 验证完成...")
+            for attempt in range(40):
+                token_value = page.evaluate("""() => {
+                    const input = document.querySelector('[name="cf-turnstile-response"]');
+                    return (input && input.value) ? input.value : '';
+                }""")
+                if token_value:
+                    print("  Turnstile 验证通过")
+                    break
+                if attempt % 10 == 9:
+                    print(f"  等待中... ({attempt + 1}s)")
+                page.wait_for_timeout(1000)
+            else:
+                context.close()
+                return None, "Turnstile 验证超时（40s）"
+
+            page.locator("button:has-text('登录')").first.click()
+            print("  已点击登录按钮，等待响应...")
+
+            for wait in range(20):
+                page.wait_for_timeout(1000)
+                current_url = page.url
+                cookies = context.cookies("https://www.nodeseek.com")
+                cookie_names = [c["name"] for c in cookies]
+                if "session" in cookie_names or current_url != SIGN_IN_URL:
+                    break
+            else:
+                error_msg = page.evaluate("""() => {
+                    const alerts = document.querySelectorAll('.alert, .error, [class*="error"], [class*="alert"]');
+                    for (const a of alerts) {
+                        if (a.textContent.trim()) return a.textContent.trim().substring(0, 200);
+                    }
+                    return '';
+                }""")
+                context.close()
+                if error_msg:
+                    return None, f"浏览器登录失败: {error_msg}"
+                return None, "登录后未获取到 session cookie"
+
+            cookies = context.cookies("https://www.nodeseek.com")
+            cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+            context.close()
+
+            if not cookie_str:
+                return None, "浏览器登录成功但未获取到 Cookie"
+            print(f"  浏览器登录成功，获取到 {len(cookies)} 个 cookie")
+            return cookie_str, "浏览器登录成功"
+    except Exception as exc:
+        return None, f"浏览器登录异常: {exc}"
 
 
 def find_nested_value(value, normalized_names: set[str]) -> str:
@@ -338,11 +524,7 @@ def get_login_security_headers(session, common_headers: dict[str, str]) -> dict[
     return headers
 
 
-def login_with_password(account: Account) -> tuple[str | None, str]:
-    token, token_message = solve_turnstile_token()
-    if not token:
-        return None, token_message
-
+def _attempt_login(account: Account, captcha_token: str | None) -> tuple[str | None, str]:
     session = requests.Session(impersonate=impersonate_version())
     common_headers = {
         "User-Agent": USER_AGENT,
@@ -357,6 +539,15 @@ def login_with_password(account: Account) -> tuple[str | None, str]:
         return None, f"登录页请求失败: {exc}"
 
     security_headers = get_login_security_headers(session, common_headers)
+    login_headers = {
+        **common_headers,
+        **security_headers,
+        "Content-Type": "application/json",
+    }
+    if captcha_token:
+        login_headers["x-captcha-source"] = "turnstile"
+        login_headers["x-captcha-token"] = captcha_token
+
     try:
         response = session.post(
             LOGIN_URL,
@@ -364,13 +555,7 @@ def login_with_password(account: Account) -> tuple[str | None, str]:
                 "username": account.user,
                 "password": account.password,
             },
-            headers={
-                **common_headers,
-                **security_headers,
-                "Content-Type": "application/json",
-                "x-captcha-source": "turnstile",
-                "x-captcha-token": token,
-            },
+            headers=login_headers,
             timeout=request_timeout(),
         )
         data = response.json()
@@ -378,13 +563,34 @@ def login_with_password(account: Account) -> tuple[str | None, str]:
         return None, f"登录请求失败: {exc}"
 
     if not isinstance(data, dict) or not data.get("success"):
-        return None, str(data.get("message") or data) if isinstance(data, dict) else str(data)
+        msg = str(data.get("message") or data) if isinstance(data, dict) else str(data)
+        return None, msg
 
     cookie_items = session.cookies.get_dict()
     cookie = "; ".join(f"{key}={value}" for key, value in cookie_items.items())
     if not cookie:
         return None, "登录成功但未获取到 Cookie"
     return cookie, "登录成功并获取到新 Cookie"
+
+
+def login_with_password(account: Account) -> tuple[str | None, str]:
+    env_captcha_token = os.getenv("NS_CAPTCHA_TOKEN", "").strip()
+    if env_captcha_token:
+        print("使用环境变量中的 captcha token 登录")
+        return _attempt_login(account, env_captcha_token)
+
+    endpoint = cf_solver_endpoint()
+    if endpoint:
+        print("尝试通过 CF_SOLVER 获取 Turnstile token...")
+        token, token_message = solve_turnstile_token()
+        if token:
+            cookie, message = _attempt_login(account, token)
+            if cookie:
+                return cookie, message
+            print(f"带 captcha API 登录失败: {message}")
+
+    print("使用浏览器完整登录流程...")
+    return login_with_browser(account)
 
 
 def github_headers(token: str) -> dict[str, str]:
@@ -427,7 +633,7 @@ def save_cookie_to_github_secret(cookie_value: str) -> bool:
     secret_name = os.getenv("GITHUB_COOKIE_SECRET_NAME", "NS_COOKIE").strip() or "NS_COOKIE"
     if not token or not repo:
         print(f"GH_PAT 或 GITHUB_REPOSITORY 未配置，跳过 {secret_name} Secret 自动更新")
-        return False
+        return True
 
     api_base = f"https://api.github.com/repos/{repo}/actions/secrets"
     headers = github_headers(token)
