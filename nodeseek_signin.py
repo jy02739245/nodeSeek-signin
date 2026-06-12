@@ -200,27 +200,13 @@ def build_nodeseek_headers(credential: str, content_type: bool = False) -> dict[
     return headers
 
 
-def sign_cookie(cookie: str, index: int, random_enabled: bool) -> SignResult:
-    headers = build_nodeseek_headers(cookie)
-    try:
-        response = requests.post(
-            ATTENDANCE_URL,
-            params={"random": str(random_enabled).lower()},
-            headers=headers,
-            timeout=request_timeout(),
-            impersonate=impersonate_version(),
-        )
-    except Exception as exc:
-        return SignResult(index, False, "request_error", f"请求异常: {exc}")
-
-    if response.status_code == 403:
+def attendance_result_from_response(index: int, status_code: int, data, text: str) -> SignResult:
+    if status_code == 403:
         return SignResult(index, False, "forbidden", "403 Forbidden，可能被 Cloudflare 拦截或 Cookie 已失效")
 
-    try:
-        data = response.json()
-    except Exception:
-        body = shorten_response(response.text)
-        return SignResult(index, False, "bad_response", f"非 JSON 响应，HTTP {response.status_code}: {body}")
+    if not isinstance(data, dict):
+        body = shorten_response(text)
+        return SignResult(index, False, "bad_response", f"非 JSON 响应，HTTP {status_code}: {body}")
 
     message = str(data.get("message") or data.get("msg") or data)
     already_done = "已完成签到" in message or "已经签到" in message or "今日已签到" in message
@@ -236,6 +222,27 @@ def sign_cookie(cookie: str, index: int, random_enabled: bool) -> SignResult:
     else:
         status = "failed"
     return SignResult(index, False, status, message)
+
+
+def sign_cookie(cookie: str, index: int, random_enabled: bool) -> SignResult:
+    headers = build_nodeseek_headers(cookie)
+    try:
+        response = requests.post(
+            ATTENDANCE_URL,
+            params={"random": str(random_enabled).lower()},
+            headers=headers,
+            timeout=request_timeout(),
+            impersonate=impersonate_version(),
+        )
+    except Exception as exc:
+        return SignResult(index, False, "request_error", f"请求异常: {exc}")
+
+    try:
+        data = response.json()
+    except Exception:
+        data = None
+
+    return attendance_result_from_response(index, response.status_code, data, response.text)
 
 
 def get_signin_stats(cookie: str, days: int = 30) -> SignStats | None:
@@ -637,14 +644,55 @@ def click_visible_login_button(page) -> bool:
         return False
 
 
-def login_with_browser(account: Account) -> tuple[str | None, str]:
+def sign_in_browser_context(page, index: int, random_enabled: bool) -> SignResult:
+    try:
+        page.goto(f"{BASE_URL}/board", wait_until="load", timeout=60000)
+        page.wait_for_timeout(2000)
+        payload = page.evaluate(
+            """async ({random}) => {
+                const response = await fetch(`/api/attendance?random=${random}`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: {
+                        'Accept': 'application/json, text/plain, */*'
+                    }
+                });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = JSON.parse(text);
+                } catch (error) {}
+                return {
+                    status: response.status,
+                    url: response.url,
+                    text,
+                    data
+                };
+            }""",
+            {"random": str(random_enabled).lower()},
+        )
+    except Exception as exc:
+        return SignResult(index, False, "request_error", f"浏览器内签到请求异常: {exc}")
+
+    status_code = int(payload.get("status") or 0)
+    text = str(payload.get("text") or "")
+    data = payload.get("data")
+    result = attendance_result_from_response(index, status_code, data, text)
+    if result.ok:
+        print(f"账号 {index} 浏览器内签到 [{result.status}]: {result.message}")
+    else:
+        print(f"账号 {index} 浏览器内签到 [{result.status}]: {result.message}")
+    return result
+
+
+def login_with_browser(account: Account, random_enabled: bool | None = None) -> tuple[str | None, str, SignResult | None]:
     try:
         from patchright.sync_api import sync_playwright
     except ImportError:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
-            return None, "patchright/playwright 未安装，无法使用浏览器登录"
+            return None, "patchright/playwright 未安装，无法使用浏览器登录", None
 
     headless = env_bool("NS_HEADLESS", False)
     print(f"启动浏览器执行完整登录流程 (headless={headless})...")
@@ -683,7 +731,7 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
             else:
                 notify_browser_login_screenshot(page, account, "失败", "Turnstile 验证超时（40s）")
                 context.close()
-                return None, "Turnstile 验证超时（40s）"
+                return None, "Turnstile 验证超时（40s）", None
 
             notify_browser_login_screenshot(page, account, "点击登录前", "已填用户名密码，Turnstile 已通过，尚未点击登录按钮")
 
@@ -704,7 +752,7 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
                 if not clicked:
                     notify_browser_login_screenshot(page, account, "失败", f"未找到可点击的登录按钮: {exc}")
                     context.close()
-                    return None, f"未找到可点击的登录按钮: {exc}"
+                    return None, f"未找到可点击的登录按钮: {exc}", None
                 print(f"  已点击登录按钮，未捕获到登录 API 响应: {exc}")
 
             print("  已点击登录按钮，等待登录态 Cookie...")
@@ -728,7 +776,7 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
                 if error_msg and wait >= 2:
                     notify_browser_login_screenshot(page, account, "失败", f"浏览器登录失败: {error_msg}")
                     context.close()
-                    return None, f"浏览器登录失败: {error_msg}"
+                    return None, f"浏览器登录失败: {error_msg}", None
             else:
                 names = ", ".join(cookie_name_list(cookies)) or "无"
                 current_url = page.url
@@ -736,13 +784,14 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
                 detail = f"未获取到有效登录 Token/Cookie；当前 URL: {current_url}；当前 NodeSeek cookie: {names}；期望包含: {expected}"
                 notify_browser_login_screenshot(page, account, "失败", detail)
                 context.close()
-                return None, f"登录后未获取到有效登录 Token/Cookie（当前 URL: {current_url}，当前 NodeSeek cookie: {names}，期望包含: {expected}）"
+                return None, f"登录后未获取到有效登录 Token/Cookie（当前 URL: {current_url}，当前 NodeSeek cookie: {names}，期望包含: {expected}）", None
 
             if auth_token:
                 notify_browser_login_screenshot(page, account, "成功", "获取到前端登录 Token")
+                browser_result = sign_in_browser_context(page, account.index, random_enabled) if random_enabled is not None else None
                 context.close()
                 print("  浏览器登录成功，获取到前端登录 Token")
-                return token_credential(auth_token), "浏览器登录成功并获取到 Token"
+                return token_credential(auth_token), "浏览器登录成功并获取到 Token", browser_result
 
             cookie_str = cookies_to_header(cookies)
             names = ", ".join(cookie_name_list(cookies)) or "无"
@@ -751,14 +800,15 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
             if not cookie_str:
                 notify_browser_login_screenshot(page, account, "失败", "浏览器登录成功但未获取到 Cookie")
                 context.close()
-                return None, "浏览器登录成功但未获取到 Cookie"
+                return None, "浏览器登录成功但未获取到 Cookie", None
             print(f"  浏览器登录成功，获取到 {len(cookies)} 个 NodeSeek cookie: {names}")
             print(f"  识别到登录凭据 Cookie: {credential_names}")
             notify_browser_login_screenshot(page, account, "成功", f"识别到登录凭据 Cookie: {credential_names}")
+            browser_result = sign_in_browser_context(page, account.index, random_enabled) if random_enabled is not None else None
             context.close()
-            return cookie_str, "浏览器登录成功"
+            return cookie_str, "浏览器登录成功", browser_result
     except Exception as exc:
-        return None, f"浏览器登录异常: {exc}"
+        return None, f"浏览器登录异常: {exc}", None
 
 
 def find_nested_value(value, normalized_names: set[str]) -> str:
@@ -894,17 +944,17 @@ def _attempt_login(account: Account, captcha_token: str | None) -> tuple[str | N
     return cookie, "登录成功并获取到新 Cookie"
 
 
-def login_with_password(account: Account) -> tuple[str | None, str]:
+def login_with_password(account: Account, random_enabled: bool) -> tuple[str | None, str, SignResult | None]:
     if env_bool("NS_FORCE_BROWSER_LOGIN", False):
         print("NS_FORCE_BROWSER_LOGIN=true，跳过账号密码 API 登录，直接使用浏览器完整登录流程")
-        return login_with_browser(account)
+        return login_with_browser(account, random_enabled)
 
     env_captcha_token = os.getenv("NS_CAPTCHA_TOKEN", "").strip()
     if env_captcha_token:
         print("使用环境变量中的 captcha token 登录")
         credential, message = _attempt_login(account, env_captcha_token)
         if credential:
-            return credential, message
+            return credential, message, None
         print(f"带环境 captcha token 的 API 登录未获取到可用凭据: {message}")
 
     endpoint = cf_solver_endpoint()
@@ -914,11 +964,11 @@ def login_with_password(account: Account) -> tuple[str | None, str]:
         if token:
             cookie, message = _attempt_login(account, token)
             if cookie:
-                return cookie, message
+                return cookie, message, None
             print(f"带 captcha API 登录失败: {message}")
 
     print("使用浏览器完整登录流程...")
-    return login_with_browser(account)
+    return login_with_browser(account, random_enabled)
 
 
 def github_headers(token: str) -> dict[str, str]:
@@ -1141,15 +1191,20 @@ def main() -> int:
             print(f"账号 {index} [{result.status}]: {result.message}")
             if account and should_retry_with_login(result):
                 print(f"账号 {index} 尝试使用账号密码和 Turnstile 自动登录")
-                new_cookie, login_message = login_with_password(account)
+                new_cookie, login_message, browser_result = login_with_password(account, random_enabled)
                 if new_cookie:
-                    print(f"账号 {index} {login_message}，重新签到")
-                    result = sign_cookie(new_cookie, index, random_enabled)
-                    print(f"账号 {index} [{result.status}]: {result.message}")
-                    if result.ok:
+                    if browser_result:
+                        print(f"账号 {index} {login_message}，已在浏览器内完成签到")
+                        result = browser_result
+                    else:
+                        print(f"账号 {index} {login_message}，重新签到")
+                        result = sign_cookie(new_cookie, index, random_enabled)
+                        print(f"账号 {index} [{result.status}]: {result.message}")
+
+                    if result.ok and not browser_result:
                         cookies[index - 1] = new_cookie
                         cookies_updated = True
-                    else:
+                    elif not result.ok:
                         print(f"账号 {index} 新登录凭据签到仍失败，不写回 GitHub Secret")
                 else:
                     result = SignResult(index, False, "login_failed", login_message)
