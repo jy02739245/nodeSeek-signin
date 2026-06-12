@@ -156,15 +156,51 @@ def impersonate_version() -> str:
     return os.getenv("NS_IMPERSONATE", "chrome136")
 
 
-def sign_cookie(cookie: str, index: int, random_enabled: bool) -> SignResult:
+def auth_value_from_credential(credential: str) -> str:
+    value = credential.strip()
+    lower_value = value.lower()
+    if lower_value.startswith("authorization:"):
+        return value.split(":", 1)[1].strip()
+    if lower_value.startswith("bearer "):
+        return value
+
+    for prefix in ("auth_token=", "access_token=", "token="):
+        if lower_value.startswith(prefix):
+            return f"Bearer {value.split('=', 1)[1].strip()}"
+
+    if value.count(".") >= 2 and ";" not in value and "=" not in value:
+        return f"Bearer {value}"
+
+    return ""
+
+
+def token_credential(token: str) -> str:
+    token = token.strip()
+    if token.lower().startswith("bearer "):
+        return token
+    return f"Bearer {token}"
+
+
+def build_nodeseek_headers(credential: str, content_type: bool = False) -> dict[str, str]:
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json",
         "Origin": BASE_URL,
         "Referer": f"{BASE_URL}/board",
-        "Cookie": cookie,
     }
+    if content_type:
+        headers["Content-Type"] = "application/json"
+
+    auth_value = auth_value_from_credential(credential)
+    if auth_value:
+        headers["Authorization"] = auth_value
+    else:
+        headers["Cookie"] = credential
+    return headers
+
+
+def sign_cookie(cookie: str, index: int, random_enabled: bool) -> SignResult:
+    headers = build_nodeseek_headers(cookie, content_type=True)
     try:
         response = requests.post(
             ATTENDANCE_URL,
@@ -212,10 +248,7 @@ def get_signin_stats(cookie: str, days: int = 30) -> SignStats | None:
     query_start = datetime.combine(start_date, time.min, tzinfo=shanghai_tz)
     signin_amounts_by_date: dict[str, int] = {}
     headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json, text/plain, */*",
-        "Referer": f"{BASE_URL}/board",
-        "Cookie": cookie,
+        **build_nodeseek_headers(cookie),
     }
 
     try:
@@ -475,6 +508,29 @@ def cookies_to_header(cookies: list[dict]) -> str:
     return "; ".join(f"{c['name']}={c['value']}" for c in cookies if c.get("name"))
 
 
+def read_browser_auth_token(page) -> str:
+    try:
+        token = page.evaluate("""() => {
+            const keys = [
+                'auth_token',
+                'access_token',
+                'token',
+                'jwt',
+                'authorization'
+            ];
+            for (const storage of [localStorage, sessionStorage]) {
+                for (const key of keys) {
+                    const value = storage.getItem(key);
+                    if (value) return value;
+                }
+            }
+            return '';
+        }""")
+        return str(token or "").strip()
+    except Exception:
+        return ""
+
+
 def login_with_browser(account: Account) -> tuple[str | None, str]:
     try:
         from patchright.sync_api import sync_playwright
@@ -527,8 +583,12 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
 
             cookies: list[dict] = []
             auth_cookie_names: list[str] = []
+            auth_token = ""
             for wait in range(45):
                 page.wait_for_timeout(1000)
+                auth_token = read_browser_auth_token(page)
+                if auth_token:
+                    break
                 cookies = nodeseek_cookies(context)
                 auth_cookie_names = cookie_name_list([cookie for cookie in cookies if is_likely_auth_cookie(cookie)])
                 if auth_cookie_names:
@@ -543,7 +603,12 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
             else:
                 names = ", ".join(cookie_name_list(cookies)) or "无"
                 context.close()
-                return None, f"登录后未获取到有效登录 Cookie（当前 NodeSeek cookie: {names}）"
+                return None, f"登录后未获取到有效登录 Token/Cookie（当前 NodeSeek cookie: {names}）"
+
+            if auth_token:
+                context.close()
+                print("  浏览器登录成功，获取到前端登录 Token")
+                return token_credential(auth_token), "浏览器登录成功并获取到 Token"
 
             cookie_str = cookies_to_header(cookies)
             names = ", ".join(cookie_name_list(cookies)) or "无"
@@ -574,6 +639,19 @@ def find_nested_value(value, normalized_names: set[str]) -> str:
             if found:
                 return found
     return ""
+
+
+def extract_login_token(data) -> str:
+    return find_nested_value(
+        data,
+        {
+            "token",
+            "authtoken",
+            "accesstoken",
+            "authorization",
+            "jwt",
+        },
+    ).strip()
 
 
 def get_login_security_headers(session, common_headers: dict[str, str]) -> dict[str, str]:
@@ -652,6 +730,10 @@ def _attempt_login(account: Account, captcha_token: str | None) -> tuple[str | N
         msg = str(data.get("message") or data) if isinstance(data, dict) else str(data)
         return None, msg
 
+    login_token = extract_login_token(data)
+    if login_token:
+        return token_credential(login_token), "登录成功并获取到新 Token"
+
     cookie_items = session.cookies.get_dict()
     if not cookie_items:
         set_cookies = response.headers.get("set-cookie", "") or ""
@@ -671,7 +753,7 @@ def _attempt_login(account: Account, captcha_token: str | None) -> tuple[str | N
 
     cookie = "; ".join(f"{key}={value}" for key, value in cookie_items.items())
     if not cookie:
-        return None, "登录成功但未获取到 Cookie"
+        return None, "登录成功但未获取到 Token/Cookie"
     return cookie, "登录成功并获取到新 Cookie"
 
 
@@ -765,7 +847,7 @@ def save_cookie_to_github_secret(cookie_value: str) -> bool:
         return False
 
     if update_response.status_code in {201, 204}:
-        print(f"GitHub Secret {secret_name} 已更新，下次 Actions 运行会使用新 Cookie")
+        print(f"GitHub Secret {secret_name} 已更新，下次 Actions 运行会使用新登录凭据")
         return True
 
     print(f"更新 GitHub Secret {secret_name} 失败: HTTP {update_response.status_code} {update_response.text}")
@@ -896,7 +978,7 @@ def main() -> int:
                         cookies[index - 1] = new_cookie
                         cookies_updated = True
                     else:
-                        print(f"账号 {index} 新 Cookie 签到仍失败，不写回 GitHub Secret")
+                        print(f"账号 {index} 新登录凭据签到仍失败，不写回 GitHub Secret")
                 else:
                     result = SignResult(index, False, "login_failed", login_message)
                     print(f"账号 {index} 自动登录失败: {login_message}")
@@ -916,12 +998,12 @@ def main() -> int:
 
     if cookies_updated:
         merged_cookie = join_cookies_for_secret(cookies)
-        print("\n检测到 Cookie 更新，准备写回 GitHub Secret NS_COOKIE")
+        print("\n检测到登录凭据更新，准备写回 GitHub Secret NS_COOKIE")
         cookie_save_failed = not save_cookie_to_github_secret(merged_cookie)
 
     has_failure = any(not result.ok for result in results)
     if fail_on_error and (has_failure or cookie_save_failed):
-        print("\n存在签到失败账号或 Cookie 写回失败，任务标记为失败。若不希望失败退出，可设置变量 FAIL_ON_ERROR=false。")
+        print("\n存在签到失败账号或登录凭据写回失败，任务标记为失败。若不希望失败退出，可设置变量 FAIL_ON_ERROR=false。")
         return 1
     return 0
 
