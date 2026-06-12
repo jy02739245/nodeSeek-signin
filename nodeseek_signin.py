@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
-from curl_cffi import CurlMime, requests
+import requests as telegram_requests
+from curl_cffi import requests
 
 
 def load_dotenv():
@@ -1091,29 +1092,18 @@ def send_telegram_photo(path: Path, caption: str) -> None:
     if thread_id:
         payload["message_thread_id"] = int(thread_id) if thread_id.isdigit() else thread_id
 
-    mime = CurlMime()
-    for key, value in payload.items():
-        mime.addpart(name=key, data=str(value))
-    mime.addpart(
-        name="photo",
-        filename=path.name,
-        local_path=str(path),
-        content_type="image/png",
-    )
-
     try:
-        response = requests.post(
-            f"{api_host}/bot{token}/sendPhoto",
-            multipart=mime,
-            timeout=30,
-            impersonate=impersonate_version(),
-        )
+        with path.open("rb") as image_file:
+            response = telegram_requests.post(
+                f"{api_host}/bot{token}/sendPhoto",
+                data=payload,
+                files={"photo": (path.name, image_file, "image/png")},
+                timeout=30,
+            )
         response.raise_for_status()
         print("Telegram 登录截图发送成功")
     except Exception as exc:
         print(f"Telegram 登录截图发送失败: {exc}")
-    finally:
-        mime.close()
 
 
 def main() -> int:
