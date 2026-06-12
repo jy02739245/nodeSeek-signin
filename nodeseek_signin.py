@@ -514,21 +514,37 @@ def telegram_configured() -> bool:
     return bool(os.getenv("TG_BOT_TOKEN", "").strip() and os.getenv("TG_USER_ID", "").strip())
 
 
-def save_browser_login_screenshot(page, account: Account) -> Path | None:
+def save_browser_login_screenshot(page, account: Account, status: str) -> Path | None:
     if not telegram_configured():
         return None
 
     screenshot_dir = Path(__file__).parent / "screenshots"
     screenshot_dir.mkdir(parents=True, exist_ok=True)
-    path = screenshot_dir / f"nodeseek-browser-login-account-{account.index}.png"
+    status_slug = {
+        "成功": "success",
+        "失败": "failure",
+    }.get(status, status)
+    safe_status = re.sub(r"[^a-z0-9_-]+", "-", status_slug.lower()).strip("-") or "state"
+    path = screenshot_dir / f"nodeseek-browser-login-{safe_status}-account-{account.index}.png"
     try:
         page.screenshot(path=str(path), full_page=True)
     except Exception as exc:
-        print(f"浏览器登录成功截图保存失败: {exc}")
+        print(f"浏览器登录截图保存失败: {exc}")
         return None
 
-    print(f"浏览器登录成功截图已保存: {path}")
+    print(f"浏览器登录截图已保存: {path}")
     return path
+
+
+def notify_browser_login_screenshot(page, account: Account, status: str, detail: str = "") -> None:
+    screenshot_path = save_browser_login_screenshot(page, account, status)
+    if not screenshot_path:
+        return
+
+    caption = f"NodeSeek 浏览器登录{status}：{mask_account_name(account.user)}"
+    if detail:
+        caption = f"{caption}\n{shorten_response(detail, 500)}"
+    send_telegram_photo(screenshot_path, caption)
 
 
 def auth_cookies(cookies: list[dict]) -> list[dict]:
@@ -663,6 +679,7 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
                     print(f"  等待中... ({attempt + 1}s)")
                 page.wait_for_timeout(1000)
             else:
+                notify_browser_login_screenshot(page, account, "失败", "Turnstile 验证超时（40s）")
                 context.close()
                 return None, "Turnstile 验证超时（40s）"
 
@@ -681,6 +698,7 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
                 if not clicked:
                     clicked = click_visible_login_button(page)
                 if not clicked:
+                    notify_browser_login_screenshot(page, account, "失败", f"未找到可点击的登录按钮: {exc}")
                     context.close()
                     return None, f"未找到可点击的登录按钮: {exc}"
                 print(f"  已点击登录按钮，未捕获到登录 API 响应: {exc}")
@@ -704,41 +722,36 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
                     print(f"  等待登录态 Cookie... 当前 NodeSeek cookie: {names}")
                 error_msg = browser_error_message(page)
                 if error_msg and wait >= 2:
+                    notify_browser_login_screenshot(page, account, "失败", f"浏览器登录失败: {error_msg}")
                     context.close()
                     return None, f"浏览器登录失败: {error_msg}"
             else:
                 names = ", ".join(cookie_name_list(cookies)) or "无"
                 current_url = page.url
                 expected = ", ".join(sorted(AUTH_COOKIE_NAMES))
+                detail = f"未获取到有效登录 Token/Cookie；当前 URL: {current_url}；当前 NodeSeek cookie: {names}；期望包含: {expected}"
+                notify_browser_login_screenshot(page, account, "失败", detail)
                 context.close()
                 return None, f"登录后未获取到有效登录 Token/Cookie（当前 URL: {current_url}，当前 NodeSeek cookie: {names}，期望包含: {expected}）"
 
             if auth_token:
-                screenshot_path = save_browser_login_screenshot(page, account)
+                notify_browser_login_screenshot(page, account, "成功", "获取到前端登录 Token")
                 context.close()
                 print("  浏览器登录成功，获取到前端登录 Token")
-                if screenshot_path:
-                    send_telegram_photo(
-                        screenshot_path,
-                        f"NodeSeek 浏览器登录成功：{mask_account_name(account.user)}",
-                    )
                 return token_credential(auth_token), "浏览器登录成功并获取到 Token"
 
             cookie_str = cookies_to_header(cookies)
             names = ", ".join(cookie_name_list(cookies)) or "无"
             credential_names = ", ".join(cookie_name_list(credential_cookies)) or "未知"
-            screenshot_path = save_browser_login_screenshot(page, account)
-            context.close()
 
             if not cookie_str:
+                notify_browser_login_screenshot(page, account, "失败", "浏览器登录成功但未获取到 Cookie")
+                context.close()
                 return None, "浏览器登录成功但未获取到 Cookie"
             print(f"  浏览器登录成功，获取到 {len(cookies)} 个 NodeSeek cookie: {names}")
             print(f"  识别到登录凭据 Cookie: {credential_names}")
-            if screenshot_path:
-                send_telegram_photo(
-                    screenshot_path,
-                    f"NodeSeek 浏览器登录成功：{mask_account_name(account.user)}",
-                )
+            notify_browser_login_screenshot(page, account, "成功", f"识别到登录凭据 Cookie: {credential_names}")
+            context.close()
             return cookie_str, "浏览器登录成功"
     except Exception as exc:
         return None, f"浏览器登录异常: {exc}"
