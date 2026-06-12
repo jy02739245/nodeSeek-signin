@@ -436,6 +436,13 @@ NOISE_COOKIE_NAMES = {
     "colorscheme",
 }
 NOISE_COOKIE_PREFIXES = ("_ga_", "__cf", "cf_")
+AUTH_COOKIE_NAMES = {
+    "fog",
+    "hmti_",
+    "pjwt",
+    "session",
+    "smac",
+}
 
 
 def nodeseek_cookies(context) -> list[dict]:
@@ -471,6 +478,11 @@ def is_noise_cookie(cookie: dict) -> bool:
     return name in NOISE_COOKIE_NAMES or any(name.startswith(prefix) for prefix in NOISE_COOKIE_PREFIXES)
 
 
+def is_auth_cookie(cookie: dict) -> bool:
+    name = str(cookie.get("name") or "").lower()
+    return name in AUTH_COOKIE_NAMES
+
+
 def browser_error_message(page) -> str:
     try:
         return page.evaluate("""() => {
@@ -498,8 +510,8 @@ def cookies_to_header(cookies: list[dict]) -> str:
     return "; ".join(f"{c['name']}={c['value']}" for c in cookies if c.get("name"))
 
 
-def non_noise_cookies(cookies: list[dict]) -> list[dict]:
-    return [cookie for cookie in cookies if not is_noise_cookie(cookie)]
+def auth_cookies(cookies: list[dict]) -> list[dict]:
+    return [cookie for cookie in cookies if is_auth_cookie(cookie)]
 
 
 def read_browser_auth_token(page) -> str:
@@ -663,7 +675,7 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
                 if auth_token:
                     break
                 cookies = nodeseek_cookies(context)
-                credential_cookies = non_noise_cookies(cookies)
+                credential_cookies = auth_cookies(cookies)
                 if credential_cookies:
                     break
                 if wait in {9, 24, 39}:
@@ -676,8 +688,9 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
             else:
                 names = ", ".join(cookie_name_list(cookies)) or "无"
                 current_url = page.url
+                expected = ", ".join(sorted(AUTH_COOKIE_NAMES))
                 context.close()
-                return None, f"登录后未获取到有效登录 Token/Cookie（当前 URL: {current_url}，当前 NodeSeek cookie: {names}）"
+                return None, f"登录后未获取到有效登录 Token/Cookie（当前 URL: {current_url}，当前 NodeSeek cookie: {names}，期望包含: {expected}）"
 
             if auth_token:
                 context.close()
