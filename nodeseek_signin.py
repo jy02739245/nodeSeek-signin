@@ -185,7 +185,6 @@ def build_nodeseek_headers(credential: str, content_type: bool = False) -> dict[
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json, text/plain, */*",
-        "Origin": BASE_URL,
         "Referer": f"{BASE_URL}/board",
     }
     if content_type:
@@ -200,7 +199,7 @@ def build_nodeseek_headers(credential: str, content_type: bool = False) -> dict[
 
 
 def sign_cookie(cookie: str, index: int, random_enabled: bool) -> SignResult:
-    headers = build_nodeseek_headers(cookie, content_type=True)
+    headers = build_nodeseek_headers(cookie)
     try:
         response = requests.post(
             ATTENDANCE_URL,
@@ -435,7 +434,6 @@ NOISE_COOKIE_NAMES = {
     "theme",
 }
 NOISE_COOKIE_PREFIXES = ("_ga_", "__cf", "cf_")
-AUTH_COOKIE_NAME_HINTS = ("session", "sess", "auth", "token", "jwt", "sid")
 
 
 def nodeseek_cookies(context) -> list[dict]:
@@ -471,16 +469,6 @@ def is_noise_cookie(cookie: dict) -> bool:
     return name in NOISE_COOKIE_NAMES or any(name.startswith(prefix) for prefix in NOISE_COOKIE_PREFIXES)
 
 
-def is_likely_auth_cookie(cookie: dict) -> bool:
-    name = str(cookie.get("name") or "").lower()
-    value = str(cookie.get("value") or "")
-    if not name or is_noise_cookie(cookie):
-        return False
-    if any(hint in name for hint in AUTH_COOKIE_NAME_HINTS):
-        return True
-    return len(value) >= 24
-
-
 def browser_error_message(page) -> str:
     try:
         return page.evaluate("""() => {
@@ -508,6 +496,10 @@ def cookies_to_header(cookies: list[dict]) -> str:
     return "; ".join(f"{c['name']}={c['value']}" for c in cookies if c.get("name"))
 
 
+def non_noise_cookies(cookies: list[dict]) -> list[dict]:
+    return [cookie for cookie in cookies if not is_noise_cookie(cookie)]
+
+
 def read_browser_auth_token(page) -> str:
     try:
         token = page.evaluate("""() => {
@@ -529,6 +521,56 @@ def read_browser_auth_token(page) -> str:
         return str(token or "").strip()
     except Exception:
         return ""
+
+
+def safe_login_response_summary(response) -> str:
+    try:
+        data = response.json()
+    except Exception:
+        return f"HTTP {response.status}"
+
+    if not isinstance(data, dict):
+        return f"HTTP {response.status}, JSON={type(data).__name__}"
+
+    keys = ", ".join(sorted(str(key) for key in data.keys()))
+    message = data.get("message") or data.get("msg") or ""
+    success = data.get("success")
+    summary = f"HTTP {response.status}, success={success}, keys=[{keys}]"
+    if message:
+        summary += f", message={str(message)[:120]}"
+    return summary
+
+
+def click_visible_login_button(page) -> bool:
+    try:
+        return bool(page.evaluate("""() => {
+            const isVisible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none'
+                    && style.visibility !== 'hidden'
+                    && rect.width > 0
+                    && rect.height > 0;
+            };
+            const password = document.querySelector('#stacked-password')
+                || document.querySelector('input[type="password"]');
+            const form = password ? password.closest('form') : null;
+            const scope = form || document;
+            const candidates = Array.from(scope.querySelectorAll('button, input[type="submit"]'));
+            const target = candidates.find((el) => {
+                const text = (el.innerText || el.value || el.textContent || '').trim();
+                return isVisible(el)
+                    && !el.disabled
+                    && !el.getAttribute('aria-disabled')
+                    && text.includes('登录');
+            });
+            if (!target) return false;
+            target.scrollIntoView({block: 'center', inline: 'center'});
+            target.click();
+            return true;
+        }"""))
+    except Exception:
+        return False
 
 
 def login_with_browser(account: Account) -> tuple[str | None, str]:
@@ -578,11 +620,29 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
                 context.close()
                 return None, "Turnstile 验证超时（40s）"
 
-            page.locator("button:has-text('登录')").first.click()
-            print("  已点击登录按钮，等待响应...")
+            login_response_summary = ""
+            clicked = False
+            try:
+                with page.expect_response(lambda response: response.url.startswith(LOGIN_URL), timeout=15000) as response_info:
+                    clicked = click_visible_login_button(page)
+                    if not clicked:
+                        page.locator("#stacked-password").press("Enter")
+                        clicked = True
+                login_response = response_info.value
+                login_response_summary = safe_login_response_summary(login_response)
+                print(f"  登录 API 响应: {login_response_summary}")
+            except Exception as exc:
+                if not clicked:
+                    clicked = click_visible_login_button(page)
+                if not clicked:
+                    context.close()
+                    return None, f"未找到可点击的登录按钮: {exc}"
+                print(f"  已点击登录按钮，未捕获到登录 API 响应: {exc}")
+
+            print("  已点击登录按钮，等待登录态 Cookie...")
 
             cookies: list[dict] = []
-            auth_cookie_names: list[str] = []
+            credential_cookies: list[dict] = []
             auth_token = ""
             for wait in range(45):
                 page.wait_for_timeout(1000)
@@ -590,8 +650,8 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
                 if auth_token:
                     break
                 cookies = nodeseek_cookies(context)
-                auth_cookie_names = cookie_name_list([cookie for cookie in cookies if is_likely_auth_cookie(cookie)])
-                if auth_cookie_names:
+                credential_cookies = non_noise_cookies(cookies)
+                if credential_cookies:
                     break
                 if wait in {9, 24, 39}:
                     names = ", ".join(cookie_name_list(cookies)) or "无"
@@ -612,13 +672,13 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
 
             cookie_str = cookies_to_header(cookies)
             names = ", ".join(cookie_name_list(cookies)) or "无"
-            auth_names = ", ".join(auth_cookie_names) or "未知"
+            credential_names = ", ".join(cookie_name_list(credential_cookies)) or "未知"
             context.close()
 
             if not cookie_str:
                 return None, "浏览器登录成功但未获取到 Cookie"
             print(f"  浏览器登录成功，获取到 {len(cookies)} 个 NodeSeek cookie: {names}")
-            print(f"  识别到登录态 Cookie: {auth_names}")
+            print(f"  识别到登录凭据 Cookie: {credential_names}")
             return cookie_str, "浏览器登录成功"
     except Exception as exc:
         return None, f"浏览器登录异常: {exc}"
@@ -765,7 +825,10 @@ def login_with_password(account: Account) -> tuple[str | None, str]:
     env_captcha_token = os.getenv("NS_CAPTCHA_TOKEN", "").strip()
     if env_captcha_token:
         print("使用环境变量中的 captcha token 登录")
-        return _attempt_login(account, env_captcha_token)
+        credential, message = _attempt_login(account, env_captcha_token)
+        if credential:
+            return credential, message
+        print(f"带环境 captcha token 的 API 登录未获取到可用凭据: {message}")
 
     endpoint = cf_solver_endpoint()
     if endpoint:
