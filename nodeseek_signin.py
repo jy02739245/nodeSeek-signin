@@ -391,6 +391,90 @@ def _click_turnstile(page):
         page.mouse.click(155, 300)
 
 
+NOISE_COOKIE_NAMES = {
+    "_ga",
+    "_gid",
+    "_gat",
+    "_cfuvid",
+    "cf_clearance",
+    "next_locale",
+    "locale",
+    "theme",
+}
+NOISE_COOKIE_PREFIXES = ("_ga_", "__cf", "cf_")
+AUTH_COOKIE_NAME_HINTS = ("session", "sess", "auth", "token", "jwt", "sid")
+
+
+def nodeseek_cookies(context) -> list[dict]:
+    try:
+        cookies = context.cookies()
+    except Exception:
+        cookies = context.cookies([BASE_URL, "https://nodeseek.com"])
+
+    seen: set[tuple[str, str, str]] = set()
+    result: list[dict] = []
+    for cookie in cookies:
+        domain = str(cookie.get("domain") or "")
+        if "nodeseek.com" not in domain:
+            continue
+        key = (
+            str(cookie.get("name") or ""),
+            domain,
+            str(cookie.get("path") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(cookie)
+    return result
+
+
+def cookie_name_list(cookies: list[dict]) -> list[str]:
+    return sorted(str(cookie.get("name") or "") for cookie in cookies if cookie.get("name"))
+
+
+def is_noise_cookie(cookie: dict) -> bool:
+    name = str(cookie.get("name") or "").lower()
+    return name in NOISE_COOKIE_NAMES or any(name.startswith(prefix) for prefix in NOISE_COOKIE_PREFIXES)
+
+
+def is_likely_auth_cookie(cookie: dict) -> bool:
+    name = str(cookie.get("name") or "").lower()
+    value = str(cookie.get("value") or "")
+    if not name or is_noise_cookie(cookie):
+        return False
+    if any(hint in name for hint in AUTH_COOKIE_NAME_HINTS):
+        return True
+    return len(value) >= 24
+
+
+def browser_error_message(page) -> str:
+    try:
+        return page.evaluate("""() => {
+            const selectors = [
+                '.alert',
+                '.error',
+                '[role="alert"]',
+                '[class*="error"]',
+                '[class*="alert"]',
+                '[class*="toast"]'
+            ];
+            for (const selector of selectors) {
+                for (const node of document.querySelectorAll(selector)) {
+                    const text = (node.textContent || '').trim();
+                    if (text) return text.substring(0, 200);
+                }
+            }
+            return '';
+        }""")
+    except Exception:
+        return ""
+
+
+def cookies_to_header(cookies: list[dict]) -> str:
+    return "; ".join(f"{c['name']}={c['value']}" for c in cookies if c.get("name"))
+
+
 def login_with_browser(account: Account) -> tuple[str | None, str]:
     try:
         from patchright.sync_api import sync_playwright
@@ -441,33 +525,35 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
             page.locator("button:has-text('登录')").first.click()
             print("  已点击登录按钮，等待响应...")
 
-            for wait in range(20):
+            cookies: list[dict] = []
+            auth_cookie_names: list[str] = []
+            for wait in range(45):
                 page.wait_for_timeout(1000)
-                current_url = page.url
-                cookies = context.cookies("https://www.nodeseek.com")
-                cookie_names = [c["name"] for c in cookies]
-                if "session" in cookie_names or current_url != SIGN_IN_URL:
+                cookies = nodeseek_cookies(context)
+                auth_cookie_names = cookie_name_list([cookie for cookie in cookies if is_likely_auth_cookie(cookie)])
+                if auth_cookie_names:
                     break
-            else:
-                error_msg = page.evaluate("""() => {
-                    const alerts = document.querySelectorAll('.alert, .error, [class*="error"], [class*="alert"]');
-                    for (const a of alerts) {
-                        if (a.textContent.trim()) return a.textContent.trim().substring(0, 200);
-                    }
-                    return '';
-                }""")
-                context.close()
-                if error_msg:
+                if wait in {9, 24, 39}:
+                    names = ", ".join(cookie_name_list(cookies)) or "无"
+                    print(f"  等待登录态 Cookie... 当前 NodeSeek cookie: {names}")
+                error_msg = browser_error_message(page)
+                if error_msg and wait >= 2:
+                    context.close()
                     return None, f"浏览器登录失败: {error_msg}"
-                return None, "登录后未获取到 session cookie"
+            else:
+                names = ", ".join(cookie_name_list(cookies)) or "无"
+                context.close()
+                return None, f"登录后未获取到有效登录 Cookie（当前 NodeSeek cookie: {names}）"
 
-            cookies = context.cookies("https://www.nodeseek.com")
-            cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+            cookie_str = cookies_to_header(cookies)
+            names = ", ".join(cookie_name_list(cookies)) or "无"
+            auth_names = ", ".join(auth_cookie_names) or "未知"
             context.close()
 
             if not cookie_str:
                 return None, "浏览器登录成功但未获取到 Cookie"
-            print(f"  浏览器登录成功，获取到 {len(cookies)} 个 cookie")
+            print(f"  浏览器登录成功，获取到 {len(cookies)} 个 NodeSeek cookie: {names}")
+            print(f"  识别到登录态 Cookie: {auth_names}")
             return cookie_str, "浏览器登录成功"
     except Exception as exc:
         return None, f"浏览器登录异常: {exc}"
@@ -803,11 +889,14 @@ def main() -> int:
                 print(f"账号 {index} 尝试使用账号密码和 Turnstile 自动登录")
                 new_cookie, login_message = login_with_password(account)
                 if new_cookie:
-                    cookies[index - 1] = new_cookie
-                    cookies_updated = True
                     print(f"账号 {index} {login_message}，重新签到")
                     result = sign_cookie(new_cookie, index, random_enabled)
                     print(f"账号 {index} [{result.status}]: {result.message}")
+                    if result.ok:
+                        cookies[index - 1] = new_cookie
+                        cookies_updated = True
+                    else:
+                        print(f"账号 {index} 新 Cookie 签到仍失败，不写回 GitHub Secret")
                 else:
                     result = SignResult(index, False, "login_failed", login_message)
                     print(f"账号 {index} 自动登录失败: {login_message}")
