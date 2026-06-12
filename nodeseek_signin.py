@@ -510,6 +510,27 @@ def cookies_to_header(cookies: list[dict]) -> str:
     return "; ".join(f"{c['name']}={c['value']}" for c in cookies if c.get("name"))
 
 
+def telegram_configured() -> bool:
+    return bool(os.getenv("TG_BOT_TOKEN", "").strip() and os.getenv("TG_USER_ID", "").strip())
+
+
+def save_browser_login_screenshot(page, account: Account) -> Path | None:
+    if not telegram_configured():
+        return None
+
+    screenshot_dir = Path(__file__).parent / "screenshots"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    path = screenshot_dir / f"nodeseek-browser-login-account-{account.index}.png"
+    try:
+        page.screenshot(path=str(path), full_page=True)
+    except Exception as exc:
+        print(f"浏览器登录成功截图保存失败: {exc}")
+        return None
+
+    print(f"浏览器登录成功截图已保存: {path}")
+    return path
+
+
 def auth_cookies(cookies: list[dict]) -> list[dict]:
     return [cookie for cookie in cookies if is_auth_cookie(cookie)]
 
@@ -693,19 +714,31 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
                 return None, f"登录后未获取到有效登录 Token/Cookie（当前 URL: {current_url}，当前 NodeSeek cookie: {names}，期望包含: {expected}）"
 
             if auth_token:
+                screenshot_path = save_browser_login_screenshot(page, account)
                 context.close()
                 print("  浏览器登录成功，获取到前端登录 Token")
+                if screenshot_path:
+                    send_telegram_photo(
+                        screenshot_path,
+                        f"NodeSeek 浏览器登录成功：{mask_account_name(account.user)}",
+                    )
                 return token_credential(auth_token), "浏览器登录成功并获取到 Token"
 
             cookie_str = cookies_to_header(cookies)
             names = ", ".join(cookie_name_list(cookies)) or "无"
             credential_names = ", ".join(cookie_name_list(credential_cookies)) or "未知"
+            screenshot_path = save_browser_login_screenshot(page, account)
             context.close()
 
             if not cookie_str:
                 return None, "浏览器登录成功但未获取到 Cookie"
             print(f"  浏览器登录成功，获取到 {len(cookies)} 个 NodeSeek cookie: {names}")
             print(f"  识别到登录凭据 Cookie: {credential_names}")
+            if screenshot_path:
+                send_telegram_photo(
+                    screenshot_path,
+                    f"NodeSeek 浏览器登录成功：{mask_account_name(account.user)}",
+                )
             return cookie_str, "浏览器登录成功"
     except Exception as exc:
         return None, f"浏览器登录异常: {exc}"
@@ -1025,6 +1058,39 @@ def send_telegram(text: str) -> None:
         print("Telegram 通知发送成功")
     except Exception as exc:
         print(f"Telegram 通知发送失败: {exc}")
+
+
+def send_telegram_photo(path: Path, caption: str) -> None:
+    token = os.getenv("TG_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TG_USER_ID", "").strip()
+    if not token or not chat_id:
+        return
+    if not path.is_file():
+        print(f"Telegram 图片发送跳过，文件不存在: {path}")
+        return
+
+    api_host = (os.getenv("TG_API_HOST") or "https://api.telegram.org").rstrip("/")
+    payload = {
+        "chat_id": chat_id,
+        "caption": caption,
+    }
+    thread_id = os.getenv("TG_THREAD_ID", "").strip()
+    if thread_id:
+        payload["message_thread_id"] = int(thread_id) if thread_id.isdigit() else thread_id
+
+    try:
+        with path.open("rb") as image_file:
+            response = requests.post(
+                f"{api_host}/bot{token}/sendPhoto",
+                data=payload,
+                files={"photo": (path.name, image_file, "image/png")},
+                timeout=30,
+                impersonate=impersonate_version(),
+            )
+        response.raise_for_status()
+        print("Telegram 登录截图发送成功")
+    except Exception as exc:
+        print(f"Telegram 登录截图发送失败: {exc}")
 
 
 def main() -> int:

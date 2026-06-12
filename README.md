@@ -61,8 +61,8 @@ cookie_or_bearer_token_of_account_2
 | `GH_PAT` | Secret | 空 | 自动更新 `NS_COOKIE` Secret 所需的 GitHub PAT |
 | `NS_SECURITY_TOKEN` | Secret | 空 | 可选调试项，覆盖登录请求头 `x-security-token`，通常不用配置 |
 | `NS_INTEGRITY_TOKEN` | Secret | 空 | 可选调试项，覆盖登录请求头 `x-integrity-token`，通常不用配置 |
-| `TG_BOT_TOKEN` | Secret | 空 | Telegram Bot Token |
-| `TG_USER_ID` | Secret | 空 | Telegram 接收者 ID |
+| `TG_BOT_TOKEN` | Secret | 空 | Telegram Bot Token，用于签到报告和浏览器登录截图 |
+| `TG_USER_ID` | Secret | 空 | Telegram 接收者 ID，用于签到报告和浏览器登录截图 |
 | `TG_THREAD_ID` | Secret | 空 | Telegram 群组话题 ID |
 | `NS_RANDOM` | Variable | `true` | 是否启用随机签到 |
 | `FAIL_ON_ERROR` | Variable | `true` | 任一账号失败时是否让 Actions 失败 |
