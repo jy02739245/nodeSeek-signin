@@ -524,6 +524,7 @@ def save_browser_login_screenshot(page, account: Account, status: str) -> Path |
     status_slug = {
         "成功": "success",
         "失败": "failure",
+        "点击登录前": "before-submit",
     }.get(status, status)
     safe_status = re.sub(r"[^a-z0-9_-]+", "-", status_slug.lower()).strip("-") or "state"
     path = screenshot_dir / f"nodeseek-browser-login-{safe_status}-account-{account.index}.png"
@@ -683,6 +684,8 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
                 notify_browser_login_screenshot(page, account, "失败", "Turnstile 验证超时（40s）")
                 context.close()
                 return None, "Turnstile 验证超时（40s）"
+
+            notify_browser_login_screenshot(page, account, "点击登录前", "已填用户名密码，Turnstile 已通过，尚未点击登录按钮")
 
             login_response_summary = ""
             clicked = False
