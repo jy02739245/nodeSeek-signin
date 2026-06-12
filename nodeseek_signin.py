@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -432,6 +433,7 @@ NOISE_COOKIE_NAMES = {
     "next_locale",
     "locale",
     "theme",
+    "colorscheme",
 }
 NOISE_COOKIE_PREFIXES = ("_ga_", "__cf", "cf_")
 
@@ -524,18 +526,29 @@ def read_browser_auth_token(page) -> str:
 
 
 def safe_login_response_summary(response) -> str:
+    status = getattr(response, "status", "?")
     try:
-        data = response.json()
+        text = response.text()
+    except Exception as exc:
+        return f"HTTP {status}, body_unavailable={type(exc).__name__}"
+
+    try:
+        data = json.loads(text)
     except Exception:
-        return f"HTTP {response.status}"
+        masked = re.sub(
+            r"[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]{16,})?",
+            "***",
+            shorten_response(text, 180),
+        )
+        return f"HTTP {status}, text={masked}"
 
     if not isinstance(data, dict):
-        return f"HTTP {response.status}, JSON={type(data).__name__}"
+        return f"HTTP {status}, JSON={type(data).__name__}"
 
     keys = ", ".join(sorted(str(key) for key in data.keys()))
     message = data.get("message") or data.get("msg") or ""
     success = data.get("success")
-    summary = f"HTTP {response.status}, success={success}, keys=[{keys}]"
+    summary = f"HTTP {status}, success={success}, keys=[{keys}]"
     if message:
         summary += f", message={str(message)[:120]}"
     return summary
@@ -662,8 +675,9 @@ def login_with_browser(account: Account) -> tuple[str | None, str]:
                     return None, f"浏览器登录失败: {error_msg}"
             else:
                 names = ", ".join(cookie_name_list(cookies)) or "无"
+                current_url = page.url
                 context.close()
-                return None, f"登录后未获取到有效登录 Token/Cookie（当前 NodeSeek cookie: {names}）"
+                return None, f"登录后未获取到有效登录 Token/Cookie（当前 URL: {current_url}，当前 NodeSeek cookie: {names}）"
 
             if auth_token:
                 context.close()
