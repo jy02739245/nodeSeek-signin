@@ -3,39 +3,15 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
-from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
-import requests as telegram_requests
 from curl_cffi import requests
-
-
-def load_dotenv():
-    env_path = Path(__file__).parent / ".env"
-    if not env_path.is_file():
-        return
-    with env_path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip("\"'")
-            if key and key not in os.environ:
-                os.environ[key] = value
-
-
-load_dotenv()
 
 
 BASE_URL = "https://www.nodeseek.com"
@@ -158,55 +134,34 @@ def impersonate_version() -> str:
     return os.getenv("NS_IMPERSONATE", "chrome136")
 
 
-def auth_value_from_credential(credential: str) -> str:
-    value = credential.strip()
-    lower_value = value.lower()
-    if lower_value.startswith("authorization:"):
-        return value.split(":", 1)[1].strip()
-    if lower_value.startswith("bearer "):
-        return value
-
-    for prefix in ("auth_token=", "access_token=", "token="):
-        if lower_value.startswith(prefix):
-            return f"Bearer {value.split('=', 1)[1].strip()}"
-
-    if value.count(".") >= 2 and ";" not in value and "=" not in value:
-        return f"Bearer {value}"
-
-    return ""
-
-
-def token_credential(token: str) -> str:
-    token = token.strip()
-    if token.lower().startswith("bearer "):
-        return token
-    return f"Bearer {token}"
-
-
-def build_nodeseek_headers(credential: str, content_type: bool = False) -> dict[str, str]:
+def sign_cookie(cookie: str, index: int, random_enabled: bool) -> SignResult:
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Origin": BASE_URL,
         "Referer": f"{BASE_URL}/board",
+        "Cookie": cookie,
     }
-    if content_type:
-        headers["Content-Type"] = "application/json"
+    try:
+        response = requests.post(
+            ATTENDANCE_URL,
+            params={"random": str(random_enabled).lower()},
+            headers=headers,
+            timeout=request_timeout(),
+            impersonate=impersonate_version(),
+        )
+    except Exception as exc:
+        return SignResult(index, False, "request_error", f"请求异常: {exc}")
 
-    auth_value = auth_value_from_credential(credential)
-    if auth_value:
-        headers["Authorization"] = auth_value
-    else:
-        headers["Cookie"] = credential
-    return headers
-
-
-def attendance_result_from_response(index: int, status_code: int, data, text: str) -> SignResult:
-    if status_code == 403:
+    if response.status_code == 403:
         return SignResult(index, False, "forbidden", "403 Forbidden，可能被 Cloudflare 拦截或 Cookie 已失效")
 
-    if not isinstance(data, dict):
-        body = shorten_response(text)
-        return SignResult(index, False, "bad_response", f"非 JSON 响应，HTTP {status_code}: {body}")
+    try:
+        data = response.json()
+    except Exception:
+        body = shorten_response(response.text)
+        return SignResult(index, False, "bad_response", f"非 JSON 响应，HTTP {response.status_code}: {body}")
 
     message = str(data.get("message") or data.get("msg") or data)
     already_done = "已完成签到" in message or "已经签到" in message or "今日已签到" in message
@@ -224,27 +179,6 @@ def attendance_result_from_response(index: int, status_code: int, data, text: st
     return SignResult(index, False, status, message)
 
 
-def sign_cookie(cookie: str, index: int, random_enabled: bool) -> SignResult:
-    headers = build_nodeseek_headers(cookie)
-    try:
-        response = requests.post(
-            ATTENDANCE_URL,
-            params={"random": str(random_enabled).lower()},
-            headers=headers,
-            timeout=request_timeout(),
-            impersonate=impersonate_version(),
-        )
-    except Exception as exc:
-        return SignResult(index, False, "request_error", f"请求异常: {exc}")
-
-    try:
-        data = response.json()
-    except Exception:
-        data = None
-
-    return attendance_result_from_response(index, response.status_code, data, response.text)
-
-
 def get_signin_stats(cookie: str, days: int = 30) -> SignStats | None:
     if not cookie:
         return None
@@ -256,7 +190,10 @@ def get_signin_stats(cookie: str, days: int = 30) -> SignStats | None:
     query_start = datetime.combine(start_date, time.min, tzinfo=shanghai_tz)
     signin_amounts_by_date: dict[str, int] = {}
     headers = {
-        **build_nodeseek_headers(cookie),
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Referer": f"{BASE_URL}/board",
+        "Cookie": cookie,
     }
 
     try:
@@ -322,7 +259,7 @@ def cf_solver_endpoint() -> str:
 def solve_turnstile_token() -> tuple[str | None, str]:
     endpoint = cf_solver_endpoint()
     if not endpoint:
-        return solve_turnstile_with_browser()
+        return None, "未配置 CF_SOLVER_URL"
 
     mode = os.getenv("CF_SOLVER_MODE", "turnstile-min").strip() or "turnstile-min"
     payload: dict[str, object] = {
@@ -347,468 +284,7 @@ def solve_turnstile_token() -> tuple[str | None, str]:
         return str(token), "验证码解析成功"
 
     message = data.get("message") if isinstance(data, dict) else response.text
-    print(f"CF_SOLVER 验证码解析失败: {message}，尝试浏览器方案...")
-    return solve_turnstile_with_browser()
-
-
-def solve_turnstile_with_browser() -> tuple[str | None, str]:
-    try:
-        from patchright.sync_api import sync_playwright
-    except ImportError:
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            return None, "patchright/playwright 未安装，无法使用浏览器解析验证码"
-
-    headless = env_bool("NS_HEADLESS", False)
-    print(f"启动浏览器解析 Turnstile 验证码 (headless={headless})...")
-
-    try:
-        with sync_playwright() as p:
-            profile_dir = str(Path(__file__).parent / ".browser_profile")
-            context = p.chromium.launch_persistent_context(
-                profile_dir,
-                headless=headless,
-                viewport={"width": 1280, "height": 800},
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            page = context.new_page()
-            page.goto(SIGN_IN_URL, wait_until="load", timeout=60000)
-            page.wait_for_timeout(8000)
-
-            _click_turnstile(page)
-
-            for attempt in range(40):
-                token_value = page.evaluate("""() => {
-                    const input = document.querySelector('[name="cf-turnstile-response"]');
-                    return (input && input.value) ? input.value : '';
-                }""")
-                if token_value:
-                    context.close()
-                    print("浏览器 Turnstile 验证码解析成功")
-                    return token_value, "验证码解析成功"
-                if attempt % 10 == 9:
-                    print(f"  等待 Turnstile 验证完成... ({attempt + 1}s)")
-                page.wait_for_timeout(1000)
-
-            context.close()
-    except Exception as exc:
-        return None, f"浏览器验证码解析异常: {exc}"
-
-    return None, "浏览器未能解析 Turnstile 验证码（超时）"
-
-
-def _click_turnstile(page):
-    for frame in page.frames:
-        if "challenges.cloudflare.com" in (frame.url or ""):
-            try:
-                el = frame.frame_element()
-                bbox = el.bounding_box()
-                if bbox:
-                    page.mouse.click(bbox["x"] + 30, bbox["y"] + bbox["height"] / 2)
-                    return
-            except Exception:
-                pass
-
-    turnstile_container = page.evaluate("""() => {
-        const el = document.querySelector('.cf-turnstile, [class*="turnstile"]');
-        if (el) {
-            const r = el.getBoundingClientRect();
-            return {x: r.x, y: r.y, w: r.width, h: r.height};
-        }
-        const input = document.querySelector('[name="cf-turnstile-response"]');
-        if (input && input.parentElement) {
-            const r = input.parentElement.getBoundingClientRect();
-            return {x: r.x, y: r.y, w: r.width, h: r.height};
-        }
-        return null;
-    }""")
-    if turnstile_container:
-        page.mouse.click(
-            turnstile_container["x"] + 30,
-            turnstile_container["y"] + turnstile_container["h"] / 2,
-        )
-    else:
-        page.mouse.click(155, 300)
-
-
-NOISE_COOKIE_NAMES = {
-    "_ga",
-    "_gid",
-    "_gat",
-    "_cfuvid",
-    "cf_clearance",
-    "next_locale",
-    "locale",
-    "theme",
-    "colorscheme",
-}
-NOISE_COOKIE_PREFIXES = ("_ga_", "__cf", "cf_")
-AUTH_COOKIE_NAMES = {
-    "fog",
-    "hmti_",
-    "pjwt",
-    "session",
-    "smac",
-}
-
-
-def nodeseek_cookies(context) -> list[dict]:
-    try:
-        cookies = context.cookies()
-    except Exception:
-        cookies = context.cookies([BASE_URL, "https://nodeseek.com"])
-
-    seen: set[tuple[str, str, str]] = set()
-    result: list[dict] = []
-    for cookie in cookies:
-        domain = str(cookie.get("domain") or "")
-        if "nodeseek.com" not in domain:
-            continue
-        key = (
-            str(cookie.get("name") or ""),
-            domain,
-            str(cookie.get("path") or ""),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(cookie)
-    return result
-
-
-def cookie_name_list(cookies: list[dict]) -> list[str]:
-    return sorted(str(cookie.get("name") or "") for cookie in cookies if cookie.get("name"))
-
-
-def is_noise_cookie(cookie: dict) -> bool:
-    name = str(cookie.get("name") or "").lower()
-    return name in NOISE_COOKIE_NAMES or any(name.startswith(prefix) for prefix in NOISE_COOKIE_PREFIXES)
-
-
-def is_auth_cookie(cookie: dict) -> bool:
-    name = str(cookie.get("name") or "").lower()
-    return name in AUTH_COOKIE_NAMES
-
-
-def browser_error_message(page) -> str:
-    try:
-        return page.evaluate("""() => {
-            const selectors = [
-                '.alert',
-                '.error',
-                '[role="alert"]',
-                '[class*="error"]',
-                '[class*="alert"]',
-                '[class*="toast"]'
-            ];
-            for (const selector of selectors) {
-                for (const node of document.querySelectorAll(selector)) {
-                    const text = (node.textContent || '').trim();
-                    if (text) return text.substring(0, 200);
-                }
-            }
-            return '';
-        }""")
-    except Exception:
-        return ""
-
-
-def cookies_to_header(cookies: list[dict]) -> str:
-    return "; ".join(f"{c['name']}={c['value']}" for c in cookies if c.get("name"))
-
-
-def telegram_configured() -> bool:
-    return bool(os.getenv("TG_BOT_TOKEN", "").strip() and os.getenv("TG_USER_ID", "").strip())
-
-
-def save_browser_login_screenshot(page, account: Account, status: str) -> Path | None:
-    if not telegram_configured():
-        return None
-
-    screenshot_dir = Path(__file__).parent / "screenshots"
-    screenshot_dir.mkdir(parents=True, exist_ok=True)
-    status_slug = {
-        "成功": "success",
-        "失败": "failure",
-        "点击登录前": "before-submit",
-    }.get(status, status)
-    safe_status = re.sub(r"[^a-z0-9_-]+", "-", status_slug.lower()).strip("-") or "state"
-    path = screenshot_dir / f"nodeseek-browser-login-{safe_status}-account-{account.index}.png"
-    try:
-        page.screenshot(path=str(path), full_page=True)
-    except Exception as exc:
-        print(f"浏览器登录截图保存失败: {exc}")
-        return None
-
-    print(f"浏览器登录截图已保存: {path}")
-    return path
-
-
-def notify_browser_login_screenshot(page, account: Account, status: str, detail: str = "") -> None:
-    screenshot_path = save_browser_login_screenshot(page, account, status)
-    if not screenshot_path:
-        return
-
-    caption = f"NodeSeek 浏览器登录{status}：{mask_account_name(account.user)}"
-    if detail:
-        caption = f"{caption}\n{shorten_response(detail, 500)}"
-    send_telegram_photo(screenshot_path, caption)
-
-
-def auth_cookies(cookies: list[dict]) -> list[dict]:
-    return [cookie for cookie in cookies if is_auth_cookie(cookie)]
-
-
-def read_browser_auth_token(page) -> str:
-    try:
-        token = page.evaluate("""() => {
-            const keys = [
-                'auth_token',
-                'access_token',
-                'token',
-                'jwt',
-                'authorization'
-            ];
-            for (const storage of [localStorage, sessionStorage]) {
-                for (const key of keys) {
-                    const value = storage.getItem(key);
-                    if (value) return value;
-                }
-            }
-            return '';
-        }""")
-        return str(token or "").strip()
-    except Exception:
-        return ""
-
-
-def safe_login_response_summary(response) -> str:
-    status = getattr(response, "status", "?")
-    try:
-        text = response.text()
-    except Exception as exc:
-        return f"HTTP {status}, body_unavailable={type(exc).__name__}"
-
-    try:
-        data = json.loads(text)
-    except Exception:
-        masked = re.sub(
-            r"[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]{16,})?",
-            "***",
-            shorten_response(text, 180),
-        )
-        return f"HTTP {status}, text={masked}"
-
-    if not isinstance(data, dict):
-        return f"HTTP {status}, JSON={type(data).__name__}"
-
-    keys = ", ".join(sorted(str(key) for key in data.keys()))
-    message = data.get("message") or data.get("msg") or ""
-    success = data.get("success")
-    summary = f"HTTP {status}, success={success}, keys=[{keys}]"
-    if message:
-        summary += f", message={str(message)[:120]}"
-    return summary
-
-
-def click_visible_login_button(page) -> bool:
-    try:
-        return bool(page.evaluate("""() => {
-            const isVisible = (el) => {
-                const style = window.getComputedStyle(el);
-                const rect = el.getBoundingClientRect();
-                return style.display !== 'none'
-                    && style.visibility !== 'hidden'
-                    && rect.width > 0
-                    && rect.height > 0;
-            };
-            const password = document.querySelector('#stacked-password')
-                || document.querySelector('input[type="password"]');
-            const form = password ? password.closest('form') : null;
-            const scope = form || document;
-            const candidates = Array.from(scope.querySelectorAll('button, input[type="submit"]'));
-            const target = candidates.find((el) => {
-                const text = (el.innerText || el.value || el.textContent || '').trim();
-                return isVisible(el)
-                    && !el.disabled
-                    && !el.getAttribute('aria-disabled')
-                    && text.includes('登录');
-            });
-            if (!target) return false;
-            target.scrollIntoView({block: 'center', inline: 'center'});
-            target.click();
-            return true;
-        }"""))
-    except Exception:
-        return False
-
-
-def sign_in_browser_context(page, index: int, random_enabled: bool) -> SignResult:
-    try:
-        page.goto(f"{BASE_URL}/board", wait_until="load", timeout=60000)
-        page.wait_for_timeout(2000)
-        payload = page.evaluate(
-            """async ({random}) => {
-                const response = await fetch(`/api/attendance?random=${random}`, {
-                    method: 'POST',
-                    credentials: 'include',
-                    headers: {
-                        'Accept': 'application/json, text/plain, */*'
-                    }
-                });
-                const text = await response.text();
-                let data = null;
-                try {
-                    data = JSON.parse(text);
-                } catch (error) {}
-                return {
-                    status: response.status,
-                    url: response.url,
-                    text,
-                    data
-                };
-            }""",
-            {"random": str(random_enabled).lower()},
-        )
-    except Exception as exc:
-        return SignResult(index, False, "request_error", f"浏览器内签到请求异常: {exc}")
-
-    status_code = int(payload.get("status") or 0)
-    text = str(payload.get("text") or "")
-    data = payload.get("data")
-    result = attendance_result_from_response(index, status_code, data, text)
-    if result.ok:
-        print(f"账号 {index} 浏览器内签到 [{result.status}]: {result.message}")
-    else:
-        print(f"账号 {index} 浏览器内签到 [{result.status}]: {result.message}")
-    return result
-
-
-def login_with_browser(account: Account, random_enabled: bool | None = None) -> tuple[str | None, str, SignResult | None]:
-    try:
-        from patchright.sync_api import sync_playwright
-    except ImportError:
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            return None, "patchright/playwright 未安装，无法使用浏览器登录", None
-
-    headless = env_bool("NS_HEADLESS", False)
-    print(f"启动浏览器执行完整登录流程 (headless={headless})...")
-
-    try:
-        with sync_playwright() as p:
-            profile_dir = str(Path(__file__).parent / ".browser_profile")
-            context = p.chromium.launch_persistent_context(
-                profile_dir,
-                headless=headless,
-                viewport={"width": 1280, "height": 800},
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            page = context.new_page()
-            page.goto(SIGN_IN_URL, wait_until="load", timeout=60000)
-            page.wait_for_timeout(8000)
-
-            page.locator("#stacked-email").fill(account.user)
-            page.locator("#stacked-password").fill(account.password)
-            print("  已填入用户名和密码")
-
-            _click_turnstile(page)
-
-            print("  等待 Turnstile 验证完成...")
-            for attempt in range(40):
-                token_value = page.evaluate("""() => {
-                    const input = document.querySelector('[name="cf-turnstile-response"]');
-                    return (input && input.value) ? input.value : '';
-                }""")
-                if token_value:
-                    print("  Turnstile 验证通过")
-                    break
-                if attempt % 10 == 9:
-                    print(f"  等待中... ({attempt + 1}s)")
-                page.wait_for_timeout(1000)
-            else:
-                notify_browser_login_screenshot(page, account, "失败", "Turnstile 验证超时（40s）")
-                context.close()
-                return None, "Turnstile 验证超时（40s）", None
-
-            notify_browser_login_screenshot(page, account, "点击登录前", "已填用户名密码，Turnstile 已通过，尚未点击登录按钮")
-
-            login_response_summary = ""
-            clicked = False
-            try:
-                with page.expect_response(lambda response: response.url.startswith(LOGIN_URL), timeout=15000) as response_info:
-                    clicked = click_visible_login_button(page)
-                    if not clicked:
-                        page.locator("#stacked-password").press("Enter")
-                        clicked = True
-                login_response = response_info.value
-                login_response_summary = safe_login_response_summary(login_response)
-                print(f"  登录 API 响应: {login_response_summary}")
-            except Exception as exc:
-                if not clicked:
-                    clicked = click_visible_login_button(page)
-                if not clicked:
-                    notify_browser_login_screenshot(page, account, "失败", f"未找到可点击的登录按钮: {exc}")
-                    context.close()
-                    return None, f"未找到可点击的登录按钮: {exc}", None
-                print(f"  已点击登录按钮，未捕获到登录 API 响应: {exc}")
-
-            print("  已点击登录按钮，等待登录态 Cookie...")
-
-            cookies: list[dict] = []
-            credential_cookies: list[dict] = []
-            auth_token = ""
-            for wait in range(45):
-                page.wait_for_timeout(1000)
-                auth_token = read_browser_auth_token(page)
-                if auth_token:
-                    break
-                cookies = nodeseek_cookies(context)
-                credential_cookies = auth_cookies(cookies)
-                if credential_cookies:
-                    break
-                if wait in {9, 24, 39}:
-                    names = ", ".join(cookie_name_list(cookies)) or "无"
-                    print(f"  等待登录态 Cookie... 当前 NodeSeek cookie: {names}")
-                error_msg = browser_error_message(page)
-                if error_msg and wait >= 2:
-                    notify_browser_login_screenshot(page, account, "失败", f"浏览器登录失败: {error_msg}")
-                    context.close()
-                    return None, f"浏览器登录失败: {error_msg}", None
-            else:
-                names = ", ".join(cookie_name_list(cookies)) or "无"
-                current_url = page.url
-                expected = ", ".join(sorted(AUTH_COOKIE_NAMES))
-                detail = f"未获取到有效登录 Token/Cookie；当前 URL: {current_url}；当前 NodeSeek cookie: {names}；期望包含: {expected}"
-                notify_browser_login_screenshot(page, account, "失败", detail)
-                context.close()
-                return None, f"登录后未获取到有效登录 Token/Cookie（当前 URL: {current_url}，当前 NodeSeek cookie: {names}，期望包含: {expected}）", None
-
-            if auth_token:
-                notify_browser_login_screenshot(page, account, "成功", "获取到前端登录 Token")
-                browser_result = sign_in_browser_context(page, account.index, random_enabled) if random_enabled is not None else None
-                context.close()
-                print("  浏览器登录成功，获取到前端登录 Token")
-                return token_credential(auth_token), "浏览器登录成功并获取到 Token", browser_result
-
-            cookie_str = cookies_to_header(cookies)
-            names = ", ".join(cookie_name_list(cookies)) or "无"
-            credential_names = ", ".join(cookie_name_list(credential_cookies)) or "未知"
-
-            if not cookie_str:
-                notify_browser_login_screenshot(page, account, "失败", "浏览器登录成功但未获取到 Cookie")
-                context.close()
-                return None, "浏览器登录成功但未获取到 Cookie", None
-            print(f"  浏览器登录成功，获取到 {len(cookies)} 个 NodeSeek cookie: {names}")
-            print(f"  识别到登录凭据 Cookie: {credential_names}")
-            notify_browser_login_screenshot(page, account, "成功", f"识别到登录凭据 Cookie: {credential_names}")
-            browser_result = sign_in_browser_context(page, account.index, random_enabled) if random_enabled is not None else None
-            context.close()
-            return cookie_str, "浏览器登录成功", browser_result
-    except Exception as exc:
-        return None, f"浏览器登录异常: {exc}", None
+    return None, f"验证码解析失败，HTTP {response.status_code}: {message}"
 
 
 def find_nested_value(value, normalized_names: set[str]) -> str:
@@ -826,19 +302,6 @@ def find_nested_value(value, normalized_names: set[str]) -> str:
             if found:
                 return found
     return ""
-
-
-def extract_login_token(data) -> str:
-    return find_nested_value(
-        data,
-        {
-            "token",
-            "authtoken",
-            "accesstoken",
-            "authorization",
-            "jwt",
-        },
-    ).strip()
 
 
 def get_login_security_headers(session, common_headers: dict[str, str]) -> dict[str, str]:
@@ -875,7 +338,11 @@ def get_login_security_headers(session, common_headers: dict[str, str]) -> dict[
     return headers
 
 
-def _attempt_login(account: Account, captcha_token: str | None) -> tuple[str | None, str]:
+def login_with_password(account: Account) -> tuple[str | None, str]:
+    token, token_message = solve_turnstile_token()
+    if not token:
+        return None, token_message
+
     session = requests.Session(impersonate=impersonate_version())
     common_headers = {
         "User-Agent": USER_AGENT,
@@ -890,15 +357,6 @@ def _attempt_login(account: Account, captcha_token: str | None) -> tuple[str | N
         return None, f"登录页请求失败: {exc}"
 
     security_headers = get_login_security_headers(session, common_headers)
-    login_headers = {
-        **common_headers,
-        **security_headers,
-        "Content-Type": "application/json",
-    }
-    if captcha_token:
-        login_headers["x-captcha-source"] = "turnstile"
-        login_headers["x-captcha-token"] = captcha_token
-
     try:
         response = session.post(
             LOGIN_URL,
@@ -906,7 +364,13 @@ def _attempt_login(account: Account, captcha_token: str | None) -> tuple[str | N
                 "username": account.user,
                 "password": account.password,
             },
-            headers=login_headers,
+            headers={
+                **common_headers,
+                **security_headers,
+                "Content-Type": "application/json",
+                "x-captcha-source": "turnstile",
+                "x-captcha-token": token,
+            },
             timeout=request_timeout(),
         )
         data = response.json()
@@ -914,61 +378,13 @@ def _attempt_login(account: Account, captcha_token: str | None) -> tuple[str | N
         return None, f"登录请求失败: {exc}"
 
     if not isinstance(data, dict) or not data.get("success"):
-        msg = str(data.get("message") or data) if isinstance(data, dict) else str(data)
-        return None, msg
-
-    login_token = extract_login_token(data)
-    if login_token:
-        return token_credential(login_token), "登录成功并获取到新 Token"
+        return None, str(data.get("message") or data) if isinstance(data, dict) else str(data)
 
     cookie_items = session.cookies.get_dict()
-    if not cookie_items:
-        set_cookies = response.headers.get("set-cookie", "") or ""
-        if not set_cookies:
-            set_cookies = "; ".join(
-                v for k, v in response.headers.items() if k.lower() == "set-cookie"
-            )
-        if set_cookies:
-            import http.cookies
-            jar = http.cookies.SimpleCookie()
-            for part in set_cookies.split(","):
-                try:
-                    jar.load(part.strip())
-                except Exception:
-                    pass
-            cookie_items = {k: v.value for k, v in jar.items()}
-
     cookie = "; ".join(f"{key}={value}" for key, value in cookie_items.items())
     if not cookie:
-        return None, "登录成功但未获取到 Token/Cookie"
+        return None, "登录成功但未获取到 Cookie"
     return cookie, "登录成功并获取到新 Cookie"
-
-
-def login_with_password(account: Account, random_enabled: bool) -> tuple[str | None, str, SignResult | None]:
-    if env_bool("NS_FORCE_BROWSER_LOGIN", False):
-        print("NS_FORCE_BROWSER_LOGIN=true，跳过账号密码 API 登录，直接使用浏览器完整登录流程")
-        return login_with_browser(account, random_enabled)
-
-    env_captcha_token = os.getenv("NS_CAPTCHA_TOKEN", "").strip()
-    if env_captcha_token:
-        print("使用环境变量中的 captcha token 登录")
-        credential, message = _attempt_login(account, env_captcha_token)
-        if credential:
-            return credential, message, None
-        print(f"带环境 captcha token 的 API 登录未获取到可用凭据: {message}")
-
-    endpoint = cf_solver_endpoint()
-    if endpoint:
-        print("尝试通过 CF_SOLVER 获取 Turnstile token...")
-        token, token_message = solve_turnstile_token()
-        if token:
-            cookie, message = _attempt_login(account, token)
-            if cookie:
-                return cookie, message, None
-            print(f"带 captcha API 登录失败: {message}")
-
-    print("使用浏览器完整登录流程...")
-    return login_with_browser(account, random_enabled)
 
 
 def github_headers(token: str) -> dict[str, str]:
@@ -1011,7 +427,7 @@ def save_cookie_to_github_secret(cookie_value: str) -> bool:
     secret_name = os.getenv("GITHUB_COOKIE_SECRET_NAME", "NS_COOKIE").strip() or "NS_COOKIE"
     if not token or not repo:
         print(f"GH_PAT 或 GITHUB_REPOSITORY 未配置，跳过 {secret_name} Secret 自动更新")
-        return True
+        return False
 
     api_base = f"https://api.github.com/repos/{repo}/actions/secrets"
     headers = github_headers(token)
@@ -1037,7 +453,7 @@ def save_cookie_to_github_secret(cookie_value: str) -> bool:
         return False
 
     if update_response.status_code in {201, 204}:
-        print(f"GitHub Secret {secret_name} 已更新，下次 Actions 运行会使用新登录凭据")
+        print(f"GitHub Secret {secret_name} 已更新，下次 Actions 运行会使用新 Cookie")
         return True
 
     print(f"更新 GitHub Secret {secret_name} 失败: HTTP {update_response.status_code} {update_response.text}")
@@ -1127,38 +543,6 @@ def send_telegram(text: str) -> None:
         print(f"Telegram 通知发送失败: {exc}")
 
 
-def send_telegram_photo(path: Path, caption: str) -> None:
-    token = os.getenv("TG_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TG_USER_ID", "").strip()
-    if not token or not chat_id:
-        return
-    if not path.is_file():
-        print(f"Telegram 图片发送跳过，文件不存在: {path}")
-        return
-
-    api_host = (os.getenv("TG_API_HOST") or "https://api.telegram.org").rstrip("/")
-    payload = {
-        "chat_id": chat_id,
-        "caption": caption,
-    }
-    thread_id = os.getenv("TG_THREAD_ID", "").strip()
-    if thread_id:
-        payload["message_thread_id"] = int(thread_id) if thread_id.isdigit() else thread_id
-
-    try:
-        with path.open("rb") as image_file:
-            response = telegram_requests.post(
-                f"{api_host}/bot{token}/sendPhoto",
-                data=payload,
-                files={"photo": (path.name, image_file, "image/png")},
-                timeout=30,
-            )
-        response.raise_for_status()
-        print("Telegram 登录截图发送成功")
-    except Exception as exc:
-        print(f"Telegram 登录截图发送失败: {exc}")
-
-
 def main() -> int:
     raw_cookies = os.getenv("NS_COOKIE") or os.getenv("NS_COOKIES") or ""
     cookies = split_cookies(raw_cookies)
@@ -1191,21 +575,13 @@ def main() -> int:
             print(f"账号 {index} [{result.status}]: {result.message}")
             if account and should_retry_with_login(result):
                 print(f"账号 {index} 尝试使用账号密码和 Turnstile 自动登录")
-                new_cookie, login_message, browser_result = login_with_password(account, random_enabled)
+                new_cookie, login_message = login_with_password(account)
                 if new_cookie:
-                    if browser_result:
-                        print(f"账号 {index} {login_message}，已在浏览器内完成签到")
-                        result = browser_result
-                    else:
-                        print(f"账号 {index} {login_message}，重新签到")
-                        result = sign_cookie(new_cookie, index, random_enabled)
-                        print(f"账号 {index} [{result.status}]: {result.message}")
-
-                    if result.ok and not browser_result:
-                        cookies[index - 1] = new_cookie
-                        cookies_updated = True
-                    elif not result.ok:
-                        print(f"账号 {index} 新登录凭据签到仍失败，不写回 GitHub Secret")
+                    cookies[index - 1] = new_cookie
+                    cookies_updated = True
+                    print(f"账号 {index} {login_message}，重新签到")
+                    result = sign_cookie(new_cookie, index, random_enabled)
+                    print(f"账号 {index} [{result.status}]: {result.message}")
                 else:
                     result = SignResult(index, False, "login_failed", login_message)
                     print(f"账号 {index} 自动登录失败: {login_message}")
@@ -1225,12 +601,12 @@ def main() -> int:
 
     if cookies_updated:
         merged_cookie = join_cookies_for_secret(cookies)
-        print("\n检测到登录凭据更新，准备写回 GitHub Secret NS_COOKIE")
+        print("\n检测到 Cookie 更新，准备写回 GitHub Secret NS_COOKIE")
         cookie_save_failed = not save_cookie_to_github_secret(merged_cookie)
 
     has_failure = any(not result.ok for result in results)
     if fail_on_error and (has_failure or cookie_save_failed):
-        print("\n存在签到失败账号或登录凭据写回失败，任务标记为失败。若不希望失败退出，可设置变量 FAIL_ON_ERROR=false。")
+        print("\n存在签到失败账号或 Cookie 写回失败，任务标记为失败。若不希望失败退出，可设置变量 FAIL_ON_ERROR=false。")
         return 1
     return 0
 

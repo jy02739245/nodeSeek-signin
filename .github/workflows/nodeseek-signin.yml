@@ -29,9 +29,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: |
-          python -m pip install -r requirements.txt
-          python -m patchright install chromium
+        run: python -m pip install -r requirements.txt
 
       - name: Run NodeSeek signin
         env:
@@ -70,9 +68,8 @@ jobs:
           NS_RANDOM: ${{ vars.NS_RANDOM || 'true' }}
           FAIL_ON_ERROR: ${{ vars.FAIL_ON_ERROR || 'true' }}
           NS_IMPERSONATE: ${{ vars.NS_IMPERSONATE || 'chrome136' }}
-          NS_FORCE_BROWSER_LOGIN: ${{ vars.NS_FORCE_BROWSER_LOGIN || 'false' }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_USER_ID: ${{ secrets.TG_USER_ID }}
           TG_THREAD_ID: ${{ secrets.TG_THREAD_ID }}
           TG_API_HOST: ${{ vars.TG_API_HOST }}
-        run: xvfb-run -a --server-args="-screen 0 1280x800x24" python nodeseek_signin.py
+        run: python nodeseek_signin.py

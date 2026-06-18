@@ -1,12 +1,12 @@
 # NodeSeek GitHub Actions 签到
 
-这是一个只保留 GitHub Actions 定时运行的 NodeSeek 签到项目。优先使用 Cookie/Token 签到，登录凭据失效时可用账号密码 + `cf-clearance-scraper` 自动登录，并把新登录凭据写回 GitHub Secret。
+这是一个只保留 GitHub Actions 定时运行的 NodeSeek 签到项目。优先使用 Cookie 签到，Cookie 失效时可用账号密码 + `cf-clearance-scraper` 自动登录，并把新 Cookie 写回 GitHub Secret。
 
 ## 使用方式
 
 1. 将本目录推送到你的 GitHub 仓库。
 2. 打开仓库 `Settings > Secrets and variables > Actions`。
-3. 在 `Secrets` 中新增 `NS_COOKIE`，值填写 NodeSeek 登录后的完整 Cookie 或 `Bearer <token>`。如果你只想用账号密码首次自动登录，也可以先不填 Cookie，但必须配置下面的自动刷新变量。
+3. 在 `Secrets` 中新增 `NS_COOKIE`，值填写 NodeSeek 登录后的完整 Cookie。如果你只想用账号密码首次自动登录，也可以先不填 Cookie，但必须配置下面的自动刷新变量。
 4. 打开仓库 `Actions > NodeSeek Signin > Run workflow` 手动测试一次。
 
 workflow 已配置每天北京时间 `08:20` 自动运行。GitHub Actions 的 cron 使用 UTC，所以 `.github/workflows/nodeseek-signin.yml` 中的 `20 0 * * *` 对应北京时间 `08:20`。
@@ -17,9 +17,9 @@ workflow 已配置每天北京时间 `08:20` 自动运行。GitHub Actions 的 c
 
 Cookie 等同于登录凭证，只放到 GitHub Secrets，不要提交到代码仓库。
 
-## 登录凭据失效自动刷新
+## Cookie 失效自动刷新
 
-如果希望 Cookie/Token 失效后自动用账号密码登录并更新 `NS_COOKIE`，继续添加这些 `Secrets`：
+如果希望 Cookie 失效后自动用账号密码登录并更新 `NS_COOKIE`，继续添加这些 `Secrets`：
 
 | 名称 | 必要性 | 说明 |
 | --- | --- | --- |
@@ -35,12 +35,12 @@ Cookie 等同于登录凭证，只放到 GitHub Secrets，不要提交到代码�
 
 ## 多账号
 
-`NS_COOKIE` 支持多个 Cookie/Token，用换行或 `&` 分隔：
+`NS_COOKIE` 支持多个 Cookie，用换行或 `&` 分隔：
 
 ```text
-cookie_or_bearer_token_of_account_1
+cookie_of_account_1
 &
-cookie_or_bearer_token_of_account_2
+cookie_of_account_2
 ```
 
 不要用分号分隔多个账号，因为单个 Cookie 本身就包含分号。
@@ -53,23 +53,23 @@ cookie_or_bearer_token_of_account_2
 
 | 名称 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `NS_COOKIE` | Secret | 建议 | NodeSeek Cookie 或 `Bearer <token>`，支持多账号 |
-| `USER`/`PASS` | Secret | 空 | 登录凭据失效时用于自动登录 |
+| `NS_COOKIE` | Secret | 建议 | NodeSeek Cookie，支持多账号 |
+| `USER`/`PASS` | Secret | 空 | Cookie 失效时用于自动登录 |
 | `USER1`/`PASS1`... | Secret | 空 | 多账号自动登录配置 |
 | `CF_SOLVER_URL` | Secret | 空 | `cf-clearance-scraper` 服务地址 |
 | `CF_SOLVER_AUTH_TOKEN` | Secret | 空 | 可选的 solver 服务认证 token |
 | `GH_PAT` | Secret | 空 | 自动更新 `NS_COOKIE` Secret 所需的 GitHub PAT |
 | `NS_SECURITY_TOKEN` | Secret | 空 | 可选调试项，覆盖登录请求头 `x-security-token`，通常不用配置 |
 | `NS_INTEGRITY_TOKEN` | Secret | 空 | 可选调试项，覆盖登录请求头 `x-integrity-token`，通常不用配置 |
-| `TG_BOT_TOKEN` | Secret | 空 | Telegram Bot Token，用于签到报告和浏览器登录前/结果截图 |
-| `TG_USER_ID` | Secret | 空 | Telegram 接收者 ID，用于签到报告和浏览器登录前/结果截图 |
+| `TG_BOT_TOKEN` | Secret | 空 | Telegram Bot Token |
+| `TG_USER_ID` | Secret | 空 | Telegram 接收者 ID |
 | `TG_THREAD_ID` | Secret | 空 | Telegram 群组话题 ID |
 | `NS_RANDOM` | Variable | `true` | 是否启用随机签到 |
 | `FAIL_ON_ERROR` | Variable | `true` | 任一账号失败时是否让 Actions 失败 |
 | `NS_IMPERSONATE` | Variable | `chrome136` | `curl_cffi` 使用的浏览器指纹 |
 | `CF_SOLVER_MODE` | Variable | `turnstile-min` | 可改为 `turnstile-max` 做完整页面解析 |
 | `GITHUB_COOKIE_SECRET_NAME` | Variable | `NS_COOKIE` | 写回的 GitHub Secret 名称，通常不用改 |
-| `SAVE_COOKIE_TO_GITHUB` | Variable | `true` | 是否把自动登录获取的新登录凭据写回 GitHub Secret |
+| `SAVE_COOKIE_TO_GITHUB` | Variable | `true` | 是否把自动登录获取的新 Cookie 写回 GitHub Secret |
 | `TG_API_HOST` | Variable | `https://api.telegram.org` | Telegram API 代理地址 |
 
 ## 本地检查
