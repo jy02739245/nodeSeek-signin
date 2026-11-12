@@ -8,6 +8,7 @@ import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
@@ -15,12 +16,7 @@ from curl_cffi import requests
 
 
 BASE_URL = "https://www.nodeseek.com"
-SIGN_IN_URL = f"{BASE_URL}/signIn.html"
 ATTENDANCE_URL = f"{BASE_URL}/api/attendance"
-LOGIN_URL = f"{BASE_URL}/api/account/signIn"
-LOGIN_UTIL_URL = f"{BASE_URL}/api/account/util"
-TURNSTILE_SITE_KEY = "0x4AAAAAAAaNy7leGjewpVyR"
-GITHUB_API_VERSION = "2022-11-28"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -35,7 +31,6 @@ class SignResult:
     status: str
     message: str
     gained: int = 0
-    account_name: str = ""
     stats: SignStats | None = None
 
 
@@ -47,18 +42,37 @@ class SignStats:
     period: str
 
 
-@dataclass
-class Account:
-    index: int
-    user: str
-    password: str
-
-
 def env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None or value == "":
         return default
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def load_local_env() -> None:
+    """加载脚本目录下的 .env；已存在的环境变量优先，GitHub Actions 不受影响。"""
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        print(f"读取 {env_path} 失败: {exc}")
+        return
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def split_cookies(raw_value: str) -> list[str]:
@@ -79,31 +93,9 @@ def split_cookies(raw_value: str) -> list[str]:
         cookie = part.strip().strip("\"'")
         if cookie.lower().startswith("cookie:"):
             cookie = cookie.split(":", 1)[1].strip()
-        cookies.append(cookie)
+        if cookie:
+            cookies.append(cookie)
     return cookies
-
-
-def join_cookies_for_secret(cookies: list[str]) -> str:
-    normalized = [cookie.strip() for cookie in cookies]
-    while normalized and not normalized[-1]:
-        normalized.pop()
-    return "&".join(normalized)
-
-
-def collect_accounts() -> list[Account]:
-    accounts: list[Account] = []
-    base_user = os.getenv("USER", "").strip()
-    base_password = os.getenv("PASS", "").strip()
-    if base_user and base_password:
-        accounts.append(Account(1, base_user, base_password))
-
-    max_accounts = int(os.getenv("MAX_ACCOUNTS", "10"))
-    for index in range(1, max_accounts + 1):
-        user = os.getenv(f"USER{index}", "").strip()
-        password = os.getenv(f"PASS{index}", "").strip()
-        if user and password:
-            accounts.append(Account(index, user, password))
-    return accounts
 
 
 def parse_gained(message: str) -> int:
@@ -130,6 +122,14 @@ def request_timeout() -> int:
     return int(os.getenv("NS_TIMEOUT", "60"))
 
 
+def request_proxies() -> dict[str, str] | None:
+    """VPS IP 被 Cloudflare 拦截时，可通过 NS_PROXY 指定出口代理。"""
+    proxy = os.getenv("NS_PROXY", "").strip()
+    if not proxy:
+        return None
+    return {"http": proxy, "https": proxy}
+
+
 def impersonate_version() -> str:
     return os.getenv("NS_IMPERSONATE", "chrome136")
 
@@ -150,6 +150,7 @@ def sign_cookie(cookie: str, index: int, random_enabled: bool) -> SignResult:
             headers=headers,
             timeout=request_timeout(),
             impersonate=impersonate_version(),
+            proxies=request_proxies(),
         )
     except Exception as exc:
         return SignResult(index, False, "request_error", f"请求异常: {exc}")
@@ -203,6 +204,7 @@ def get_signin_stats(cookie: str, days: int = 30) -> SignStats | None:
                 headers=headers,
                 timeout=request_timeout(),
                 impersonate=impersonate_version(),
+                proxies=request_proxies(),
             )
             data = response.json()
             if not isinstance(data, dict):
@@ -243,233 +245,6 @@ def get_signin_stats(cookie: str, days: int = 30) -> SignStats | None:
     )
 
 
-def should_retry_with_login(result: SignResult) -> bool:
-    return result.status in {"invalid_cookie", "forbidden", "bad_response", "failed", "missing_cookie"}
-
-
-def cf_solver_endpoint() -> str:
-    solver_url = os.getenv("CF_SOLVER_URL", "").strip().rstrip("/")
-    if not solver_url:
-        return ""
-    if solver_url.endswith("/cf-clearance-scraper"):
-        return solver_url
-    return f"{solver_url}/cf-clearance-scraper"
-
-
-def solve_turnstile_token() -> tuple[str | None, str]:
-    endpoint = cf_solver_endpoint()
-    if not endpoint:
-        return None, "未配置 CF_SOLVER_URL"
-
-    mode = os.getenv("CF_SOLVER_MODE", "turnstile-min").strip() or "turnstile-min"
-    payload: dict[str, object] = {
-        "url": SIGN_IN_URL,
-        "mode": mode,
-    }
-    if mode == "turnstile-min":
-        payload["siteKey"] = TURNSTILE_SITE_KEY
-
-    auth_token = os.getenv("CF_SOLVER_AUTH_TOKEN", "").strip()
-    if auth_token:
-        payload["authToken"] = auth_token
-
-    try:
-        response = requests.post(endpoint, json=payload, timeout=request_timeout())
-        data = response.json()
-    except Exception as exc:
-        return None, f"请求验证码服务失败: {exc}"
-
-    token = data.get("token") if isinstance(data, dict) else None
-    if response.status_code == 200 and token:
-        return str(token), "验证码解析成功"
-
-    message = data.get("message") if isinstance(data, dict) else response.text
-    return None, f"验证码解析失败，HTTP {response.status_code}: {message}"
-
-
-def find_nested_value(value, normalized_names: set[str]) -> str:
-    if isinstance(value, dict):
-        for key, item in value.items():
-            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
-            if normalized_key in normalized_names and item:
-                return str(item)
-            found = find_nested_value(item, normalized_names)
-            if found:
-                return found
-    elif isinstance(value, list):
-        for item in value:
-            found = find_nested_value(item, normalized_names)
-            if found:
-                return found
-    return ""
-
-
-def get_login_security_headers(session, common_headers: dict[str, str]) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    env_security_token = os.getenv("NS_SECURITY_TOKEN", "").strip()
-    env_integrity_token = os.getenv("NS_INTEGRITY_TOKEN", "").strip()
-    if env_security_token:
-        headers["x-security-token"] = env_security_token
-    if env_integrity_token:
-        headers["x-integrity-token"] = env_integrity_token
-
-    if headers:
-        return headers
-
-    try:
-        response = session.get(
-            LOGIN_UTIL_URL,
-            headers=common_headers,
-            timeout=request_timeout(),
-        )
-        data = response.json()
-    except Exception as exc:
-        print(f"登录安全 token 获取失败: {exc}")
-        return headers
-
-    security_token = find_nested_value(data, {"securitytoken", "xsecuritytoken"})
-    integrity_token = find_nested_value(data, {"integritytoken", "xintegritytoken"})
-    if security_token:
-        headers["x-security-token"] = security_token
-    if integrity_token:
-        headers["x-integrity-token"] = integrity_token
-    if headers:
-        print("已获取登录安全 token")
-    return headers
-
-
-def login_with_password(account: Account) -> tuple[str | None, str]:
-    token, token_message = solve_turnstile_token()
-    if not token:
-        return None, token_message
-
-    session = requests.Session(impersonate=impersonate_version())
-    common_headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json, text/plain, */*",
-        "Origin": BASE_URL,
-        "Referer": SIGN_IN_URL,
-    }
-
-    try:
-        session.get(SIGN_IN_URL, headers=common_headers, timeout=request_timeout())
-    except Exception as exc:
-        return None, f"登录页请求失败: {exc}"
-
-    security_headers = get_login_security_headers(session, common_headers)
-    try:
-        response = session.post(
-            LOGIN_URL,
-            json={
-                "username": account.user,
-                "password": account.password,
-            },
-            headers={
-                **common_headers,
-                **security_headers,
-                "Content-Type": "application/json",
-                "x-captcha-source": "turnstile",
-                "x-captcha-token": token,
-            },
-            timeout=request_timeout(),
-        )
-        data = response.json()
-    except Exception as exc:
-        return None, f"登录请求失败: {exc}"
-
-    if not isinstance(data, dict) or not data.get("success"):
-        return None, str(data.get("message") or data) if isinstance(data, dict) else str(data)
-
-    cookie_items = session.cookies.get_dict()
-    cookie = "; ".join(f"{key}={value}" for key, value in cookie_items.items())
-    if not cookie:
-        return None, "登录成功但未获取到 Cookie"
-    return cookie, "登录成功并获取到新 Cookie"
-
-
-def github_headers(token: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": GITHUB_API_VERSION,
-        "User-Agent": "nodeSeek-signin",
-    }
-
-
-def encrypt_for_github_secret(public_key_value: str, secret_value: str) -> str:
-    import base64
-    from nacl import encoding, public
-
-    public_key = public.PublicKey(public_key_value.encode("utf-8"), encoding.Base64Encoder())
-    sealed_box = public.SealedBox(public_key)
-    encrypted = sealed_box.encrypt(secret_value.encode("utf-8"))
-    return base64.b64encode(encrypted).decode("utf-8")
-
-
-def github_error_detail(response) -> str:
-    accepted_permissions = response.headers.get("x-accepted-github-permissions", "")
-    oauth_scopes = response.headers.get("x-oauth-scopes", "")
-    detail = f"HTTP {response.status_code}: {shorten_response(response.text, 500)}"
-    if accepted_permissions:
-        detail += f"; accepted-permissions={accepted_permissions}"
-    if oauth_scopes:
-        detail += f"; oauth-scopes={oauth_scopes}"
-    return detail
-
-
-def save_cookie_to_github_secret(cookie_value: str) -> bool:
-    if not env_bool("SAVE_COOKIE_TO_GITHUB", True):
-        print("SAVE_COOKIE_TO_GITHUB=false，跳过 GitHub Secret 写回")
-        return True
-
-    token = os.getenv("GH_PAT", "").strip()
-    repo = os.getenv("GITHUB_REPOSITORY", "").strip()
-    secret_name = os.getenv("GITHUB_COOKIE_SECRET_NAME", "NS_COOKIE").strip() or "NS_COOKIE"
-    if not token or not repo:
-        print(f"GH_PAT 或 GITHUB_REPOSITORY 未配置，跳过 {secret_name} Secret 自动更新")
-        return False
-
-    api_base = f"https://api.github.com/repos/{repo}/actions/secrets"
-    headers = github_headers(token)
-    try:
-        key_response = requests.get(f"{api_base}/public-key", headers=headers, timeout=30)
-        if key_response.status_code != 200:
-            print(f"获取 GitHub 仓库 public key 失败: {github_error_detail(key_response)}")
-            return False
-        key_data = key_response.json()
-
-        encrypted_value = encrypt_for_github_secret(key_data["key"], cookie_value)
-        update_response = requests.put(
-            f"{api_base}/{secret_name}",
-            headers=headers,
-            json={
-                "encrypted_value": encrypted_value,
-                "key_id": key_data["key_id"],
-            },
-            timeout=30,
-        )
-    except Exception as exc:
-        print(f"更新 GitHub Secret {secret_name} 失败: {exc}")
-        return False
-
-    if update_response.status_code in {201, 204}:
-        print(f"GitHub Secret {secret_name} 已更新，下次 Actions 运行会使用新 Cookie")
-        return True
-
-    print(f"更新 GitHub Secret {secret_name} 失败: HTTP {update_response.status_code} {update_response.text}")
-    return False
-
-
-def mask_account_name(account_name: str) -> str:
-    if not account_name:
-        return "账号"
-    if account_name.startswith("账号"):
-        return account_name
-    if len(account_name) <= 2:
-        return account_name[0] + "***"
-    return account_name[:2] + "***"
-
-
 def format_number(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
@@ -488,8 +263,7 @@ def build_report(results: Iterable[SignResult]) -> str:
     ]
 
     for result in result_list:
-        account_name = result.account_name or f"账号{result.index}"
-        lines.append(f"账号：{mask_account_name(account_name)}")
+        lines.append(f"账号：账号{result.index}")
 
         if result.ok:
             if result.gained or "鸡腿" in result.message or "收益" in result.message:
@@ -544,69 +318,33 @@ def send_telegram(text: str) -> None:
 
 
 def main() -> int:
-    raw_cookies = os.getenv("NS_COOKIE") or os.getenv("NS_COOKIES") or ""
-    cookies = split_cookies(raw_cookies)
-    accounts = collect_accounts()
-    if not cookies and not accounts:
-        print("未配置 NS_COOKIE，也未配置 USER/PASS。请至少配置其中一种方式。")
+    load_local_env()
+
+    cookies = split_cookies(os.getenv("NS_COOKIE") or os.getenv("NS_COOKIES") or "")
+    if not cookies:
+        print("未配置 NS_COOKIE。请把 NodeSeek 登录后的 Cookie 填到 NS_COOKIE。")
         return 2
 
     random_enabled = env_bool("NS_RANDOM", True)
     fail_on_error = env_bool("FAIL_ON_ERROR", True)
-    max_count = max(len(cookies), len(accounts))
-    while len(cookies) < max_count:
-        cookies.append("")
 
-    print(f"发现 {len([cookie for cookie in cookies if cookie])} 个 Cookie，{len(accounts)} 组账号密码，随机签到: {str(random_enabled).lower()}")
+    print(f"发现 {len(cookies)} 个 Cookie，随机签到: {str(random_enabled).lower()}")
     results: list[SignResult] = []
-    cookies_updated = False
-    cookie_save_failed = False
 
-    for index in range(1, max_count + 1):
-        cookie = cookies[index - 1]
-        account = accounts[index - 1] if index - 1 < len(accounts) else None
-        account_name = account.user if account else f"账号{index}"
+    for index, cookie in enumerate(cookies, start=1):
         print(f"\n开始签到账号 {index}")
-        result = sign_cookie(cookie, index, random_enabled) if cookie else SignResult(index, False, "missing_cookie", "无 Cookie")
-
+        result = sign_cookie(cookie, index, random_enabled)
+        print(f"账号 {index} [{result.status}]: {result.message}")
         if result.ok:
-            print(f"账号 {index} [{result.status}]: {result.message}")
-        else:
-            print(f"账号 {index} [{result.status}]: {result.message}")
-            if account and should_retry_with_login(result):
-                print(f"账号 {index} 尝试使用账号密码和 Turnstile 自动登录")
-                new_cookie, login_message = login_with_password(account)
-                if new_cookie:
-                    cookies[index - 1] = new_cookie
-                    cookies_updated = True
-                    print(f"账号 {index} {login_message}，重新签到")
-                    result = sign_cookie(new_cookie, index, random_enabled)
-                    print(f"账号 {index} [{result.status}]: {result.message}")
-                else:
-                    result = SignResult(index, False, "login_failed", login_message)
-                    print(f"账号 {index} 自动登录失败: {login_message}")
-            elif should_retry_with_login(result):
-                print(f"账号 {index} 未配置对应 USER/PASS，无法自动登录刷新 Cookie")
-
-        result.account_name = account_name
-        if result.ok:
-            effective_cookie = cookies[index - 1]
-            result.stats = get_signin_stats(effective_cookie, 30)
-
+            result.stats = get_signin_stats(cookie, 30)
         results.append(result)
 
     report = build_report(results)
     print("\n" + report)
     send_telegram(report)
 
-    if cookies_updated:
-        merged_cookie = join_cookies_for_secret(cookies)
-        print("\n检测到 Cookie 更新，准备写回 GitHub Secret NS_COOKIE")
-        cookie_save_failed = not save_cookie_to_github_secret(merged_cookie)
-
-    has_failure = any(not result.ok for result in results)
-    if fail_on_error and (has_failure or cookie_save_failed):
-        print("\n存在签到失败账号或 Cookie 写回失败，任务标记为失败。若不希望失败退出，可设置变量 FAIL_ON_ERROR=false。")
+    if fail_on_error and any(not result.ok for result in results):
+        print("\n存在签到失败账号，任务标记为失败。可设置 FAIL_ON_ERROR=false 关闭。")
         return 1
     return 0
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Run NodeSeek sign-in every day at 08:20 Asia/Shanghai
+
+[Timer]
+# 需要 systemd >= 235 才支持 OnCalendar 里的时区后缀
+OnCalendar=*-*-* 08:20:00 Asia/Shanghai
+# 随机延迟 0-10 分钟，避免固定时刻请求
+RandomizedDelaySec=600
+# 关机/休眠错过时，开机后补跑一次
+Persistent=true
+Unit=nodeseek-signin.service
+
+[Install]
+WantedBy=timers.target

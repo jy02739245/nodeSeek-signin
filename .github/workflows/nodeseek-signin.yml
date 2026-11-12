@@ -1,10 +1,8 @@
 name: NodeSeek Signin
 
 on:
+  # 只保留手动触发
   workflow_dispatch:
-  schedule:
-    # GitHub Actions 使用 UTC；这里是北京时间每天 08:20。
-    - cron: "20 0 * * *"
 
 permissions:
   contents: read
@@ -34,37 +32,8 @@ jobs:
       - name: Run NodeSeek signin
         env:
           NS_COOKIE: ${{ secrets.NS_COOKIE }}
-          USER: ${{ secrets.USER }}
-          PASS: ${{ secrets.PASS }}
-          USER1: ${{ secrets.USER1 }}
-          PASS1: ${{ secrets.PASS1 }}
-          USER2: ${{ secrets.USER2 }}
-          PASS2: ${{ secrets.PASS2 }}
-          USER3: ${{ secrets.USER3 }}
-          PASS3: ${{ secrets.PASS3 }}
-          USER4: ${{ secrets.USER4 }}
-          PASS4: ${{ secrets.PASS4 }}
-          USER5: ${{ secrets.USER5 }}
-          PASS5: ${{ secrets.PASS5 }}
-          USER6: ${{ secrets.USER6 }}
-          PASS6: ${{ secrets.PASS6 }}
-          USER7: ${{ secrets.USER7 }}
-          PASS7: ${{ secrets.PASS7 }}
-          USER8: ${{ secrets.USER8 }}
-          PASS8: ${{ secrets.PASS8 }}
-          USER9: ${{ secrets.USER9 }}
-          PASS9: ${{ secrets.PASS9 }}
-          USER10: ${{ secrets.USER10 }}
-          PASS10: ${{ secrets.PASS10 }}
-          CF_SOLVER_URL: ${{ secrets.CF_SOLVER_URL }}
-          CF_SOLVER_AUTH_TOKEN: ${{ secrets.CF_SOLVER_AUTH_TOKEN }}
-          CF_SOLVER_MODE: ${{ vars.CF_SOLVER_MODE || 'turnstile-min' }}
-          NS_SECURITY_TOKEN: ${{ secrets.NS_SECURITY_TOKEN }}
-          NS_INTEGRITY_TOKEN: ${{ secrets.NS_INTEGRITY_TOKEN }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_COOKIE_SECRET_NAME: NS_COOKIE
-          SAVE_COOKIE_TO_GITHUB: ${{ vars.SAVE_COOKIE_TO_GITHUB || 'true' }}
+          NS_PROXY: ${{ secrets.NS_PROXY }}
+          NS_TIMEOUT: ${{ vars.NS_TIMEOUT || '60' }}
           NS_RANDOM: ${{ vars.NS_RANDOM || 'true' }}
           FAIL_ON_ERROR: ${{ vars.FAIL_ON_ERROR || 'true' }}
           NS_IMPERSONATE: ${{ vars.NS_IMPERSONATE || 'chrome136' }}

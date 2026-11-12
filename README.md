@@ -1,37 +1,21 @@
-# NodeSeek GitHub Actions 签到
+# NodeSeek 自动签到
 
-这是一个只保留 GitHub Actions 定时运行的 NodeSeek 签到项目。优先使用 Cookie 签到，Cookie 失效时可用账号密码 + `cf-clearance-scraper` 自动登录，并把新 Cookie 写回 GitHub Secret。
+只依赖 Cookie 的 NodeSeek 每日签到，支持 GitHub Actions 和 VPS（systemd）。签到后查询近 30 天收益，并可通过 Telegram 推送结果。
 
-## 使用方式
+## 使用方式（GitHub Actions）
 
 1. 将本目录推送到你的 GitHub 仓库。
 2. 打开仓库 `Settings > Secrets and variables > Actions`。
-3. 在 `Secrets` 中新增 `NS_COOKIE`，值填写 NodeSeek 登录后的完整 Cookie。如果你只想用账号密码首次自动登录，也可以先不填 Cookie，但必须配置下面的自动刷新变量。
+3. 在 `Secrets` 中新增 `NS_COOKIE`，值填写 NodeSeek 登录后的完整 Cookie。
 4. 打开仓库 `Actions > NodeSeek Signin > Run workflow` 手动测试一次。
 
-workflow 已配置每天北京时间 `08:20` 自动运行。GitHub Actions 的 cron 使用 UTC，所以 `.github/workflows/nodeseek-signin.yml` 中的 `20 0 * * *` 对应北京时间 `08:20`。
+workflow 只支持手动触发（`workflow_dispatch`），不会按计划自动运行；需要每天定时签到时用 VPS 部署。
 
 ## 获取 Cookie
 
 登录 NodeSeek 后，打开浏览器开发者工具，在 Network 面板里点任意 `www.nodeseek.com` 请求，复制 Request Headers 里的 `Cookie` 内容。
 
-Cookie 等同于登录凭证，只放到 GitHub Secrets，不要提交到代码仓库。
-
-## Cookie 失效自动刷新
-
-如果希望 Cookie 失效后自动用账号密码登录并更新 `NS_COOKIE`，继续添加这些 `Secrets`：
-
-| 名称 | 必要性 | 说明 |
-| --- | --- | --- |
-| `USER` | 必填 | NodeSeek 用户名 |
-| `PASS` | 必填 | NodeSeek 密码 |
-| `CF_SOLVER_URL` | 必填 | 你部署的 `cf-clearance-scraper` 服务 URL，例如 `https://example.com` |
-| `GH_PAT` | 必填 | 用于更新仓库 Secret 的 GitHub PAT |
-| `CF_SOLVER_AUTH_TOKEN` | 可选 | 只有你的 `cf-clearance-scraper` 服务启用了 `authToken` 时才需要 |
-
-`cf-clearance-scraper` 默认接口是 `POST /cf-clearance-scraper`。你只需要填服务根地址，脚本会自动拼接接口路径。
-
-`GH_PAT` 推荐使用 fine-grained token，只给当前仓库权限，并开启 `Secrets` 的 read/write 权限。Classic token 可用 `repo` scope。
+Cookie 等同于登录凭证，只放到 GitHub Secrets 或 VPS 的 `.env`，不要提交到代码仓库。
 
 ## 多账号
 
@@ -43,34 +27,104 @@ cookie_of_account_1
 cookie_of_account_2
 ```
 
-不要用分号分隔多个账号，因为单个 Cookie 本身就包含分号。
-
-多账号自动刷新时，按顺序配置 `USER1`/`PASS1`、`USER2`/`PASS2`，最多默认读取到 `USER10`/`PASS10`。如果只配置一个账号，也可以直接用 `USER`/`PASS`。
+不要用分号分隔多个账号，因为单个 Cookie 本身就包含分号。VPS 的 `.env` 不支持多行，直接用 `&` 连接。
 
 ## 可选配置
 
-这些配置放在 `Settings > Secrets and variables > Actions` 中：
+GitHub Actions 里放在 `Settings > Secrets and variables > Actions`；VPS 部署写在项目根目录的 `.env` 中，变量名相同：
 
 | 名称 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `NS_COOKIE` | Secret | 建议 | NodeSeek Cookie，支持多账号 |
-| `USER`/`PASS` | Secret | 空 | Cookie 失效时用于自动登录 |
-| `USER1`/`PASS1`... | Secret | 空 | 多账号自动登录配置 |
-| `CF_SOLVER_URL` | Secret | 空 | `cf-clearance-scraper` 服务地址 |
-| `CF_SOLVER_AUTH_TOKEN` | Secret | 空 | 可选的 solver 服务认证 token |
-| `GH_PAT` | Secret | 空 | 自动更新 `NS_COOKIE` Secret 所需的 GitHub PAT |
-| `NS_SECURITY_TOKEN` | Secret | 空 | 可选调试项，覆盖登录请求头 `x-security-token`，通常不用配置 |
-| `NS_INTEGRITY_TOKEN` | Secret | 空 | 可选调试项，覆盖登录请求头 `x-integrity-token`，通常不用配置 |
+| `NS_COOKIE` | Secret | 必填 | NodeSeek Cookie，支持多账号 |
+| `NS_PROXY` | Secret | 空 | 访问 NodeSeek 的 HTTP/SOCKS 代理，VPS IP 被拦截时用 |
+| `NS_TIMEOUT` | Variable | `60` | 单次请求超时秒数 |
+| `NS_RANDOM` | Variable | `true` | 是否启用随机签到 |
+| `FAIL_ON_ERROR` | Variable | `true` | 任一账号失败时是否让任务失败 |
+| `NS_IMPERSONATE` | Variable | `chrome136` | `curl_cffi` 使用的浏览器指纹 |
 | `TG_BOT_TOKEN` | Secret | 空 | Telegram Bot Token |
 | `TG_USER_ID` | Secret | 空 | Telegram 接收者 ID |
 | `TG_THREAD_ID` | Secret | 空 | Telegram 群组话题 ID |
-| `NS_RANDOM` | Variable | `true` | 是否启用随机签到 |
-| `FAIL_ON_ERROR` | Variable | `true` | 任一账号失败时是否让 Actions 失败 |
-| `NS_IMPERSONATE` | Variable | `chrome136` | `curl_cffi` 使用的浏览器指纹 |
-| `CF_SOLVER_MODE` | Variable | `turnstile-min` | 可改为 `turnstile-max` 做完整页面解析 |
-| `GITHUB_COOKIE_SECRET_NAME` | Variable | `NS_COOKIE` | 写回的 GitHub Secret 名称，通常不用改 |
-| `SAVE_COOKIE_TO_GITHUB` | Variable | `true` | 是否把自动登录获取的新 Cookie 写回 GitHub Secret |
 | `TG_API_HOST` | Variable | `https://api.telegram.org` | Telegram API 代理地址 |
+
+## VPS 部署
+
+要求 Python 3.10+ 和 systemd，不依赖浏览器或 Docker。
+
+### 1. 放代码
+
+放在任意目录即可，配置和虚拟环境都跟着项目走：
+
+```bash
+git clone <你的仓库地址> ~/nodeSeek-signin
+cd ~/nodeSeek-signin
+```
+
+### 2. 一键安装
+
+```bash
+sudo bash deploy/install.sh
+```
+
+脚本就地安装：`.env` 和 `.venv` 都在项目目录下，systemd 里写的是这个目录的绝对路径。运行用户默认取执行 `sudo` 的用户（直接用 root 跑时用 `nodeseek`），可用 `SERVICE_USER=xxx` 覆盖。安装后启用 `nodeseek-signin.timer`：每天北京时间 `08:20` 触发，随机延迟 0–10 分钟。
+
+### 3. 配置 Cookie
+
+推荐用脚本写入，自动替换 `NS_COOKIE` 并设好权限：
+
+```bash
+sudo bash deploy/set-cookie.sh
+```
+
+按提示粘贴 Cookie（输入不回显），回车确认。
+
+也可以手动编辑项目目录下的 `.env`：
+
+```bash
+sudo nano ~/nodeSeek-signin/.env
+```
+
+把 `NS_COOKIE=` 后面改成从浏览器复制的 Cookie，只占一行；多账号用 `&` 连接：
+
+```bash
+NS_COOKIE=account1_cookie&account2_cookie
+```
+
+Cookie 从哪来：登录 NodeSeek，在浏览器开发者工具 Network 面板点任意 `www.nodeseek.com` 请求，复制 Request Headers 里的 `Cookie` 内容。Cookie 只保存在服务器本地 `.env`，脚本不会上传到别处。
+
+### 4. 启动并手动验证
+
+首次安装时 `.env` 是空的，定时器只 enable 未启动，填好配置后执行：
+
+```bash
+sudo systemctl start nodeseek-signin.timer
+sudo systemctl start nodeseek-signin.service
+journalctl -u nodeseek-signin.service -n 100 --no-pager
+systemctl list-timers nodeseek-signin.timer
+```
+
+### 5. 更新代码
+
+```bash
+cd ~/nodeSeek-signin
+sudo git pull
+sudo .venv/bin/pip install -r requirements.txt
+```
+
+timer 下次触发就用新代码，不需要重启服务。
+
+### Cookie 过期怎么办
+
+重新从浏览器复制 Cookie，在项目目录执行 `sudo bash deploy/set-cookie.sh` 覆盖即可。下次 timer 触发自动读取新值，不用重启服务；想立刻验证就 `sudo systemctl start nodeseek-signin.service`。
+
+### VPS 上容易踩的坑
+
+- **IP 被 Cloudflare 拦**：签到接口返回 403 时，在 `.env` 配 `NS_PROXY`，签到和统计请求都会走该代理。
+- **`.env` 是 systemd 格式**：不支持多行值，多账号 Cookie 用 `&` 连接；值里有空格或引号时用单引号包住整个值。
+- **Telegram 不通**：国内 VPS 直连 `api.telegram.org` 会超时，用 `TG_API_HOST` 换成自己的反代。
+- **时区**：timer 已固定 `Asia/Shanghai`，不用改服务器时区；脚本统计日期同样按北京时间。
+- **失败处理**：`FAIL_ON_ERROR=true` 时任一账号失败服务会标记失败，只想记日志就设 `false`。
+- **依赖**：只有 `curl_cffi`，独立 venv 约几十 MB；想和其他 Python 项目共用，安装时传 `VENV_DIR=/path/to/venv`。
+- **项目目录**：systemd 里记录的是安装时的绝对路径，之后移动目录要重新执行 `deploy/install.sh`；不要把项目放在 `/root` 下，运行用户读不到。需要换运行用户时传 `SERVICE_USER=xxx`。
 
 ## 本地检查
 
