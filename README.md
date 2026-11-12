@@ -37,6 +37,9 @@ GitHub Actions 里放在 `Settings > Secrets and variables > Actions`；VPS 部�
 | --- | --- | --- | --- |
 | `NS_COOKIE` | Secret | 必填 | NodeSeek Cookie，支持多账号 |
 | `NS_PROXY` | Secret | 空 | 访问 NodeSeek 的 HTTP/SOCKS 代理，VPS IP 被拦截时用 |
+| `NODE_LINK` | Secret | 空 | 仅 VPS：VLESS + XHTTP 节点链接，配置后自动起 Xray |
+| `NS_PROXY_PORT` | Variable | `1082` | 仅 VPS：`NODE_LINK` 的本地代理端口 |
+| `XRAY_PATH` | Variable | 空 | 仅 VPS：Xray 可执行文件路径，默认从 PATH 找 |
 | `NS_TIMEOUT` | Variable | `60` | 单次请求超时秒数 |
 | `NS_RANDOM` | Variable | `true` | 是否启用随机签到 |
 | `FAIL_ON_ERROR` | Variable | `true` | 任一账号失败时是否让任务失败 |
@@ -116,9 +119,42 @@ timer 下次触发就用新代码，不需要重启服务。
 
 重新从浏览器复制 Cookie，在项目目录执行 `sudo bash deploy/set-cookie.sh` 覆盖即可。下次 timer 触发自动读取新值，不用重启服务；想立刻验证就 `sudo systemctl start nodeseek-signin.service`。
 
+### 节点代理（NODE_LINK，VLESS + XHTTP）
+
+VPS 的 IP 被 Cloudflare 拦时，可以让签到请求走你的节点。只支持 VLESS + XHTTP，后端只依赖 Xray：
+
+```bash
+sudo bash deploy/install-xray.sh
+# 或者在安装时一起装：
+# sudo bash deploy/install.sh --with-xray
+```
+
+然后在 `.env` 里填节点链接：
+
+```dotenv
+NODE_LINK=vless://uuid@host:443?type=xhttp&security=reality&pbk=公钥&fp=chrome&sni=域名&sid=shortid&path=%2F
+# 可选，默认 1082
+NS_PROXY_PORT=1082
+# 可选，Xray 不在 PATH 时指定
+# XRAY_PATH=/usr/local/bin/xray
+```
+
+运行逻辑：
+
+- 配置 `NODE_LINK` 后，脚本启动 Xray，在 `127.0.0.1:1082` 开 HTTP 代理，签到和收益统计都走这个节点，任务结束后自动退出。
+- `NODE_LINK` 优先于 `NS_PROXY`；两者都配时用节点。
+- 支持 `type=xhttp` 和 `type=splithttp`；`ws` / `grpc` 不支持。
+- 链接里的 UUID 等同密码，`.env` 保持 `600`，不要提交到仓库。
+
+只检查链接解析（输出含密钥，别外传）：
+
+```bash
+.venv/bin/python nodeseek_proxy.py --link 'vless://...' --print-config
+```
+
 ### VPS 上容易踩的坑
 
-- **IP 被 Cloudflare 拦**：签到接口返回 403 时，在 `.env` 配 `NS_PROXY`，签到和统计请求都会走该代理。
+- **IP 被 Cloudflare 拦**：签到接口返回 403 时，在 `.env` 配 `NODE_LINK`（VLESS + XHTTP）或 `NS_PROXY`，签到和统计请求都会走对应出口。
 - **`.env` 是 systemd 格式**：不支持多行值，多账号 Cookie 用 `&` 连接；值里有空格或引号时用单引号包住整个值。
 - **Telegram 不通**：国内 VPS 直连 `api.telegram.org` 会超时，用 `TG_API_HOST` 换成自己的反代。
 - **时区**：timer 已固定 `Asia/Shanghai`，不用改服务器时区；脚本统计日期同样按北京时间。

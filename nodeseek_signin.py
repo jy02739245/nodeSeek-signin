@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 
 from curl_cffi import requests
 
+from nodeseek_proxy import ProxyError, maybe_launch
+
 
 BASE_URL = "https://www.nodeseek.com"
 ATTENDANCE_URL = f"{BASE_URL}/api/attendance"
@@ -317,14 +319,7 @@ def send_telegram(text: str) -> None:
         print(f"Telegram 通知发送失败: {exc}")
 
 
-def main() -> int:
-    load_local_env()
-
-    cookies = split_cookies(os.getenv("NS_COOKIE") or os.getenv("NS_COOKIES") or "")
-    if not cookies:
-        print("未配置 NS_COOKIE。请把 NodeSeek 登录后的 Cookie 填到 NS_COOKIE。")
-        return 2
-
+def run_signin(cookies: list[str]) -> int:
     random_enabled = env_bool("NS_RANDOM", True)
     fail_on_error = env_bool("FAIL_ON_ERROR", True)
 
@@ -347,6 +342,32 @@ def main() -> int:
         print("\n存在签到失败账号，任务标记为失败。可设置 FAIL_ON_ERROR=false 关闭。")
         return 1
     return 0
+
+
+def main() -> int:
+    load_local_env()
+
+    cookies = split_cookies(os.getenv("NS_COOKIE") or os.getenv("NS_COOKIES") or "")
+    if not cookies:
+        print("未配置 NS_COOKIE。请把 NodeSeek 登录后的 Cookie 填到 NS_COOKIE。")
+        return 2
+
+    try:
+        with maybe_launch() as node_proxy:
+            previous_proxy = os.environ.get("NS_PROXY")
+            if node_proxy:
+                print(f"NODE_LINK 代理就绪: {node_proxy}")
+                os.environ["NS_PROXY"] = node_proxy
+            try:
+                return run_signin(cookies)
+            finally:
+                if previous_proxy is None:
+                    os.environ.pop("NS_PROXY", None)
+                else:
+                    os.environ["NS_PROXY"] = previous_proxy
+    except ProxyError as exc:
+        print(f"NODE_LINK 启动失败: {exc}")
+        return 1
 
 
 if __name__ == "__main__":

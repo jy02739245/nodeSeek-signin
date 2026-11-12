@@ -1,7 +1,22 @@
 #!/usr/bin/env bash
 # 就地安装：配置(.env)和虚拟环境都放在项目目录，并注册 systemd 定时器。
-# 用法：sudo bash deploy/install.sh
+# 用法：sudo bash deploy/install.sh [--with-xray]
 set -euo pipefail
+
+WITH_XRAY=0
+for arg in "$@"; do
+  case "$arg" in
+    --with-xray) WITH_XRAY=1 ;;
+    -h|--help)
+      sed -n '2,3p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "未知参数: $arg" >&2
+      exit 2
+      ;;
+  esac
+done
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_OWNER="$(stat -c '%U' "$APP_DIR" 2>/dev/null || echo root)"
@@ -52,6 +67,10 @@ fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip -q
 "$VENV_DIR/bin/python" -m pip install -q -r "$APP_DIR/requirements.txt"
 
+if [[ "$WITH_XRAY" == "1" ]]; then
+  bash "$APP_DIR/deploy/install-xray.sh"
+fi
+
 if [[ ! -f "$APP_DIR/.env" ]]; then
   log "生成 .env（首次部署）"
   cp "$APP_DIR/deploy/env.example" "$APP_DIR/.env"
@@ -94,3 +113,6 @@ fi
 
 systemctl list-timers nodeseek-signin.timer --no-pager || true
 printf '\n配置：%s/.env\nPython：%s\n' "$APP_DIR" "$VENV_DIR/bin/python"
+if [[ ! -x /usr/local/bin/xray ]] && ! command -v xray >/dev/null 2>&1; then
+  printf '提示：配置 NODE_LINK 前先执行 sudo bash %s/deploy/install-xray.sh\n' "$APP_DIR"
+fi
